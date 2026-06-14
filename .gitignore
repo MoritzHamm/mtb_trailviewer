@@ -1,0 +1,21 @@
+# LiDAR source data — large binaries, stored externally
+*.laz
+*.las
+
+# Generated raster outputs
+*.tif
+*.tiff
+
+# Generated tile pyramid
+viewer/tiles/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+lidar-env/
+
+# OS
+.DS_Store
+Thumbs.db

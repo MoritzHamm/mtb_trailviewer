@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Terrain Viewer</title>
+  <script src="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.js"></script>
+  <link   href="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.css" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body { font-family: system-ui, sans-serif; background: #1a1a1a; }
+
+    #map { position: absolute; inset: 0; }
+
+    /* ---- control panel ---- */
+    #controls {
+      position: absolute;
+      top: 12px; right: 12px;
+      background: rgba(20, 20, 20, 0.88);
+      backdrop-filter: blur(6px);
+      color: #e8e8e8;
+      border-radius: 8px;
+      padding: 14px 16px;
+      width: 220px;
+      font-size: 13px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.5);
+    }
+
+    #controls h2 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: #fff;
+      letter-spacing: .3px;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .row label { color: #bbb; }
+    .row .val  { color: #fff; font-variant-numeric: tabular-nums; min-width: 38px; text-align: right; }
+
+    input[type=range] {
+      width: 100%;
+      margin: 4px 0 10px;
+      accent-color: #5ba4cf;
+    }
+
+    .sep { border: none; border-top: 1px solid #333; margin: 10px 0; }
+
+    .toggle-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .toggle-row label { color: #bbb; cursor: pointer; }
+
+    input[type=checkbox] { accent-color: #5ba4cf; width: 15px; height: 15px; cursor: pointer; }
+
+    /* ---- status bar ---- */
+    #status {
+      position: absolute;
+      bottom: 8px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(20, 20, 20, 0.75);
+      color: #ccc;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 4px;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+
+    /* ---- sun compass ---- */
+    #compass-wrap {
+      display: flex;
+      justify-content: center;
+      margin: 6px 0 10px;
+    }
+
+    #sun-canvas {
+      cursor: pointer;
+      border-radius: 50%;
+      background: radial-gradient(circle, #2a2a40, #111);
+      border: 1px solid #333;
+    }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="controls">
+  <h2>Terrain viewer</h2>
+
+  <!-- sun compass dial -->
+  <div id="compass-wrap">
+    <canvas id="sun-canvas" width="90" height="90"></canvas>
+  </div>
+
+  <div class="row">
+    <label>Sun direction</label>
+    <span class="val" id="az-val">315°</span>
+  </div>
+  <input type="range" id="azimuth" min="0" max="359" value="315">
+
+  <div class="row">
+    <label>Sun altitude</label>
+    <span class="val" id="alt-val">35°</span>
+  </div>
+  <input type="range" id="altitude" min="5" max="85" value="35">
+
+  <div class="row">
+    <label>Shading strength</label>
+    <span class="val" id="ex-val">0.6</span>
+  </div>
+  <input type="range" id="exaggeration" min="0" max="10" step="1" value="6">
+
+  <hr class="sep">
+
+  <div class="toggle-row">
+    <label for="toggle-3d">3D terrain</label>
+    <input type="checkbox" id="toggle-3d">
+  </div>
+
+  <div class="toggle-row" id="vert-row" style="opacity:.4;pointer-events:none">
+    <label>Vertical scale</label>
+    <span class="val" id="vert-val">1.5×</span>
+  </div>
+  <input type="range" id="vert-ex" min="5" max="40" step="1" value="15"
+         style="opacity:.4;pointer-events:none">
+</div>
+
+<div id="status">Move mouse over the map</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Map init
+// ---------------------------------------------------------------------------
+const CENTER_LNG = 15.625;   // Lövberget / Falun area
+const CENTER_LAT = 60.608;
+const START_ZOOM = 13;
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: {
+    version: 8,
+    glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+    sources: {
+      osm: {
+        type: 'raster',
+        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+        tileSize: 256,
+        attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxzoom: 19,
+      },
+      terrain: {
+        type: 'raster-dem',
+        tiles: ['http://localhost:8080/tiles/{z}/{x}/{y}.png'],
+        tileSize: 256,
+        encoding: 'mapbox',
+        minzoom: 12,
+        maxzoom: 15,
+        attribution: '© Lantmäteriet LiDAR',
+      },
+    },
+    layers: [
+      { id: 'osm',       type: 'raster', source: 'osm', paint: { 'raster-opacity': 1.0 } },
+      { id: 'hillshade', type: 'hillshade', source: 'terrain', paint: {
+          'hillshade-illumination-anchor': 'map',
+          'hillshade-illumination-direction': 315,
+          'hillshade-exaggeration': 0.6,
+          'hillshade-shadow-color': '#2a2a3a',
+          'hillshade-highlight-color': '#fffbe8',
+        }
+      },
+    ],
+  },
+  center: [CENTER_LNG, CENTER_LAT],
+  zoom: START_ZOOM,
+  maxPitch: 85,
+});
+
+// ---------------------------------------------------------------------------
+// Controls → map
+// ---------------------------------------------------------------------------
+const azSlider  = document.getElementById('azimuth');
+const altSlider = document.getElementById('altitude');
+const exSlider  = document.getElementById('exaggeration');
+const vertSlider = document.getElementById('vert-ex');
+const toggle3d  = document.getElementById('toggle-3d');
+const azVal     = document.getElementById('az-val');
+const altVal    = document.getElementById('alt-val');
+const exVal     = document.getElementById('ex-val');
+const vertVal   = document.getElementById('vert-val');
+
+function updateHillshade() {
+  const az = parseInt(azSlider.value);
+  const ex = parseInt(exSlider.value) / 10;
+  azVal.textContent = az + '°';
+  exVal.textContent = ex.toFixed(1);
+  map.setPaintProperty('hillshade', 'hillshade-illumination-direction', az);
+  map.setPaintProperty('hillshade', 'hillshade-exaggeration', ex);
+  drawCompass(az);
+}
+
+altSlider.addEventListener('input', () => {
+  altVal.textContent = altSlider.value + '°';
+  // MapLibre's hillshade layer doesn't expose altitude natively;
+  // we modulate shadow/highlight colours to simulate it.
+  const t = parseInt(altSlider.value) / 85;          // 0 = low sun, 1 = zenith
+  const shadowL  = Math.round(20 + t * 30);          // brighter shadow at high sun
+  const highlightL = Math.round(95 + t * 4);
+  map.setPaintProperty('hillshade', 'hillshade-shadow-color',
+    `hsl(240, 15%, ${shadowL}%)`);
+  map.setPaintProperty('hillshade', 'hillshade-highlight-color',
+    `hsl(45, 30%, ${highlightL}%)`);
+});
+
+azSlider.addEventListener('input', updateHillshade);
+exSlider.addEventListener('input', updateHillshade);
+
+toggle3d.addEventListener('change', () => {
+  const on = toggle3d.checked;
+  const vertRow = document.getElementById('vert-row');
+  vertRow.style.opacity     = on ? '1' : '.4';
+  vertRow.style.pointerEvents = on ? '' : 'none';
+  vertSlider.style.opacity  = on ? '1' : '.4';
+  vertSlider.style.pointerEvents = on ? '' : 'none';
+
+  if (on) {
+    map.setTerrain({ source: 'terrain', exaggeration: parseInt(vertSlider.value) / 10 });
+    map.easeTo({ pitch: 50, duration: 600 });
+  } else {
+    map.setTerrain(null);
+    map.easeTo({ pitch: 0, duration: 600 });
+  }
+});
+
+vertSlider.addEventListener('input', () => {
+  const v = parseInt(vertSlider.value) / 10;
+  vertVal.textContent = v.toFixed(1) + '×';
+  if (toggle3d.checked) map.setTerrain({ source: 'terrain', exaggeration: v });
+});
+
+// ---------------------------------------------------------------------------
+// Sun compass dial
+// ---------------------------------------------------------------------------
+const canvas = document.getElementById('sun-canvas');
+const ctx    = canvas.getContext('2d');
+let dragging = false;
+
+function drawCompass(azDeg) {
+  const w = canvas.width, h = canvas.height;
+  const cx = w / 2, cy = h / 2, r = w / 2 - 4;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Tick marks
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 360; i += 45) {
+    const a = (i - 90) * Math.PI / 180;
+    const inner = i % 90 === 0 ? r - 10 : r - 6;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * inner, cy + Math.sin(a) * inner);
+    ctx.lineTo(cx + Math.cos(a) * r,     cy + Math.sin(a) * r);
+    ctx.stroke();
+  }
+
+  // Cardinal labels
+  const labels = { 0: 'N', 90: 'E', 180: 'S', 270: 'W' };
+  ctx.fillStyle = '#666';
+  ctx.font = '8px system-ui';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const [deg, lbl] of Object.entries(labels)) {
+    const a = (parseInt(deg) - 90) * Math.PI / 180;
+    ctx.fillText(lbl, cx + Math.cos(a) * (r - 14), cy + Math.sin(a) * (r - 14));
+  }
+
+  // Sun dot
+  const sa = (azDeg - 90) * Math.PI / 180;
+  const sr = r - 18;
+  const sx = cx + Math.cos(sa) * sr;
+  const sy = cy + Math.sin(sa) * sr;
+
+  // Glow
+  const grd = ctx.createRadialGradient(sx, sy, 0, sx, sy, 10);
+  grd.addColorStop(0,   'rgba(255,220,80,.9)');
+  grd.addColorStop(0.4, 'rgba(255,180,40,.4)');
+  grd.addColorStop(1,   'rgba(255,180,40,0)');
+  ctx.fillStyle = grd;
+  ctx.beginPath();
+  ctx.arc(sx, sy, 10, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Core
+  ctx.fillStyle = '#ffd040';
+  ctx.beginPath();
+  ctx.arc(sx, sy, 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function azFromPointer(e) {
+  const rect = canvas.getBoundingClientRect();
+  const cx = rect.left + canvas.width / 2;
+  const cy = rect.top  + canvas.height / 2;
+  const dx = e.clientX - cx;
+  const dy = e.clientY - cy;
+  let deg = Math.round(Math.atan2(dy, dx) * 180 / Math.PI + 90);
+  if (deg < 0) deg += 360;
+  return deg % 360;
+}
+
+canvas.addEventListener('mousedown', e => {
+  dragging = true;
+  azSlider.value = azFromPointer(e);
+  updateHillshade();
+});
+document.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  azSlider.value = azFromPointer(e);
+  updateHillshade();
+});
+document.addEventListener('mouseup', () => { dragging = false; });
+
+// Touch support for the dial
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  dragging = true;
+  azSlider.value = azFromPointer(e.touches[0]);
+  updateHillshade();
+});
+document.addEventListener('touchmove', e => {
+  if (!dragging) return;
+  azSlider.value = azFromPointer(e.touches[0]);
+  updateHillshade();
+});
+document.addEventListener('touchend', () => { dragging = false; });
+
+// ---------------------------------------------------------------------------
+// Status bar: coordinates + elevation
+// ---------------------------------------------------------------------------
+const status = document.getElementById('status');
+
+map.on('mousemove', e => {
+  const { lng, lat } = e.lngLat;
+  const elev = map.queryTerrainElevation(e.lngLat, { exaggerated: false });
+  const elevStr = elev !== null ? ` · ${Math.round(elev)} m` : '';
+  status.textContent = `${lat.toFixed(5)}°N  ${lng.toFixed(5)}°E${elevStr}`;
+});
+
+map.on('mouseleave', () => {
+  status.textContent = 'Move mouse over the map';
+});
+
+// Initial compass draw
+drawCompass(315);
+</script>
+</body>
+</html>
