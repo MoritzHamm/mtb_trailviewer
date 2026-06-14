@@ -166,13 +166,17 @@ const map = new maplibregl.Map({
         tiles: ['http://localhost:8080/tiles/{z}/{x}/{y}.png'],
         tileSize: 256,
         encoding: 'mapbox',
-        minzoom: 12,
+        minzoom: 8,
         maxzoom: 15,
         attribution: '© Lantmäteriet LiDAR',
       },
+      coverage: {
+        type: 'geojson',
+        data: 'http://localhost:8080/tiles/coverage.geojson',
+      },
     },
     layers: [
-      { id: 'osm',       type: 'raster', source: 'osm', paint: { 'raster-opacity': 1.0 } },
+      { id: 'osm', type: 'raster', source: 'osm', paint: { 'raster-opacity': 1.0 } },
       { id: 'hillshade', type: 'hillshade', source: 'terrain', paint: {
           'hillshade-illumination-anchor': 'map',
           'hillshade-illumination-direction': 315,
@@ -180,6 +184,16 @@ const map = new maplibregl.Map({
           'hillshade-shadow-color': '#2a2a3a',
           'hillshade-highlight-color': '#fffbe8',
         }
+      },
+      // grey-out everything outside the tile coverage
+      { id: 'coverage-mask', type: 'fill', source: 'coverage',
+        filter: ['==', ['get', 'type'], 'mask'],
+        paint: { 'fill-color': '#888888', 'fill-opacity': 0.35 },
+      },
+      // dashed orange border around the coverage extent
+      { id: 'coverage-border', type: 'line', source: 'coverage',
+        filter: ['==', ['get', 'type'], 'border'],
+        paint: { 'line-color': '#ff7733', 'line-width': 2, 'line-dasharray': [4, 3] },
       },
     ],
   },

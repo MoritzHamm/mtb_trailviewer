@@ -10,6 +10,7 @@ Usage:
     python generate_elevation_tiles.py [dtm.tif] [out_dir] [--zoom 12 15]
 """
 
+import json
 import math
 import os
 import sys
@@ -165,7 +166,48 @@ def generate_tiles(dtm_path: str | Path, out_dir: Path,
             print(f"\n      → {written} tiles written")
             total_written += written
 
+    write_coverage_geojson(bounds_wgs84, out_dir)
     print(f"\nDone. {total_written} tiles total in {out_dir}")
+
+
+def write_coverage_geojson(bounds_wgs84: tuple, out_dir: Path) -> None:
+    """Write coverage.geojson with two features:
+    - 'mask'  : inverted polygon (world minus coverage) for the grey-out fill
+    - 'border': coverage rectangle for the dashed boundary line
+    """
+    west, south, east, north = bounds_wgs84
+    geojson = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"type": "mask"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        # outer ring: whole world (CCW)
+                        [[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]],
+                        # inner ring: coverage area as hole (CW = punches a window)
+                        [[west, south], [west, north], [east, north], [east, south], [west, south]],
+                    ],
+                },
+            },
+            {
+                "type": "Feature",
+                "properties": {"type": "border"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [west, south], [east, south],
+                        [east, north], [west, north], [west, south],
+                    ]],
+                },
+            },
+        ],
+    }
+    path = out_dir / "coverage.geojson"
+    path.write_text(json.dumps(geojson))
+    print(f"Coverage extent : {path}")
 
 
 # ---------------------------------------------------------------------------
