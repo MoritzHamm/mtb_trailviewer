@@ -118,7 +118,7 @@ def _worker(args: tuple) -> tuple[str, float, str]:
     laz_path = Path(laz_path)
     out_path = Path(out_dir) / f"{laz_path.stem}_dtm.tif"
 
-    if out_path.exists():
+    if out_path.exists() and out_path.stat().st_size > 0:
         return laz_path.stem, 0.0, "skip"
 
     t0 = time.monotonic()
@@ -134,7 +134,7 @@ def _worker(args: tuple) -> tuple[str, float, str]:
 # ---------------------------------------------------------------------------
 
 def build_vrt(dtm_dir: Path, vrt_path: Path) -> None:
-    tifs = sorted(dtm_dir.glob("*_dtm.tif"))
+    tifs = sorted(t for t in dtm_dir.glob("*_dtm.tif") if t.stat().st_size > 0)
     if not tifs:
         print("No DTM files found — skipping VRT build.")
         return
@@ -149,6 +149,13 @@ def build_vrt(dtm_dir: Path, vrt_path: Path) -> None:
     ]
     subprocess.run(cmd, check=True)
     print(f"VRT ready: {vrt_path}")
+
+
+def build_overviews(vrt_path: Path) -> None:
+    print(f"\nBuilding overviews (gdaladdo) — this takes a few minutes …")
+    cmd = ["gdaladdo", "-ro", str(vrt_path), "2", "4", "8", "16", "32", "64", "128", "256"]
+    subprocess.run(cmd, check=True)
+    print("Overviews done.")
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +176,8 @@ def main() -> None:
                         help=f"Parallel workers (default: min(4, cpu_count())={min(4, cpu_count())})")
     parser.add_argument("--no-vrt", action="store_true",
                         help="Skip VRT build after processing")
+    parser.add_argument("--no-overviews", action="store_true",
+                        help="Skip gdaladdo overview build after VRT")
     args = parser.parse_args()
 
     laz_files = sorted(glob.glob(str(Path(args.laz_dir) / args.pattern)))
@@ -222,8 +231,10 @@ def main() -> None:
     if not args.no_vrt:
         vrt_path = out_dir / "merged.vrt"
         build_vrt(out_dir, vrt_path)
+        if not args.no_overviews:
+            build_overviews(vrt_path)
         print(f"\nNext step:")
-        print(f"  python generate_elevation_tiles.py {vrt_path} viewer/tiles --zoom 8 15")
+        print(f"  python generate_elevation_tiles.py {vrt_path} /mnt/g/lidar-output/tiles --zoom 8 15")
 
 
 if __name__ == "__main__":

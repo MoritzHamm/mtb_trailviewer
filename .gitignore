@@ -5,6 +5,7 @@
 # Generated raster outputs
 *.tif
 *.tiff
+dtm/
 
 # Generated tile pyramid
 viewer/tiles/

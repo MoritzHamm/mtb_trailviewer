@@ -16,6 +16,7 @@ import os
 import sys
 import argparse
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 from PIL import Image
@@ -136,35 +137,49 @@ def generate_tile(src: rasterio.DatasetReader,
     return True
 
 
+def _tile_worker(args: tuple) -> bool:
+    """Top-level function so ProcessPoolExecutor can pickle it.
+    Each worker opens its own handle to avoid sharing rasterio datasets across processes."""
+    dtm_path, tx, ty, z, out_dir = args
+    with rasterio.open(dtm_path) as src:
+        return generate_tile(src, tx, ty, z, Path(out_dir))
+
+
 def generate_tiles(dtm_path: str | Path, out_dir: Path,
                    zoom_min: int = 12, zoom_max: int = 15) -> None:
-    out_dir = Path(out_dir)
+    dtm_path = str(dtm_path)
+    out_dir  = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(dtm_path) as src:
         bounds_wgs84 = transform_bounds(src.crs, WGS84, *src.bounds)
         west, south, east, north = bounds_wgs84
         print(f"Source CRS   : {src.crs}")
-        print(f"Bounds WGS84 : {west:.4f}°W  {south:.4f}°S  {east:.4f}°E  {north:.4f}°N")
+        print(f"Bounds WGS84 : {west:.4f}°E  {south:.4f}°N  {east:.4f}°E  {north:.4f}°N")
         print(f"Nodata       : {src.nodata}")
         print()
 
-        total_written = 0
+    workers = os.cpu_count() or 4
+    print(f"Using {workers} parallel workers\n")
 
-        for z in range(zoom_min, zoom_max + 1):
-            tile_list = list(tiles_for_bounds(west, south, east, north, z))
-            written   = 0
+    total_written = 0
 
-            print(f"Z{z:02d}  {len(tile_list)} candidate tiles", end="", flush=True)
+    for z in range(zoom_min, zoom_max + 1):
+        tile_list = [(dtm_path, tx, ty, z, str(out_dir))
+                     for tx, ty in tiles_for_bounds(west, south, east, north, z)]
+        written = 0
 
-            for i, (tx, ty) in enumerate(tile_list):
-                if generate_tile(src, tx, ty, z, out_dir):
+        print(f"Z{z:02d}  {len(tile_list)} candidate tiles", end="", flush=True)
+
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for i, result in enumerate(pool.map(_tile_worker, tile_list, chunksize=16)):
+                if result:
                     written += 1
-                if (i + 1) % 50 == 0:
+                if (i + 1) % 200 == 0:
                     print(f"\n      {i+1}/{len(tile_list)} ({written} written)", end="", flush=True)
 
-            print(f"\n      → {written} tiles written")
-            total_written += written
+        print(f"\n      → {written} tiles written")
+        total_written += written
 
     write_coverage_geojson(bounds_wgs84, out_dir)
     print(f"\nDone. {total_written} tiles total in {out_dir}")
