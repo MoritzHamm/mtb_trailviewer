@@ -21,8 +21,8 @@ set -euo pipefail
 # Config
 # ---------------------------------------------------------------------------
 LIDAR_DIR="/home/mo/lidar"
-PBF="/mnt/g/Download/sweden-latest.osm.pbf"
-WORK="/mnt/g/lidar-output"
+PBF="/home/mo/lidar/osm/sweden-latest.osm.pbf"
+WORK="/home/mo/lidar-output"
 LAYERS="$WORK/osm_layers"
 PMTILES="$WORK/dalarna.pmtiles"
 VIEWER="$LIDAR_DIR/viewer/tiles"
