@@ -6,6 +6,7 @@
   <title>Terrain Viewer</title>
   <script src="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.js"></script>
   <link   href="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.css" rel="stylesheet">
+  <script src="https://unpkg.com/pmtiles@3.2.0/dist/pmtiles.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -149,6 +150,10 @@
 // ---------------------------------------------------------------------------
 // Map init
 // ---------------------------------------------------------------------------
+// Register PMTiles protocol so MapLibre can read .pmtiles files directly
+const pmtilesProtocol = new pmtiles.Protocol();
+maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile.bind(pmtilesProtocol));
+
 const CENTER_LNG = 15.625;   // Lövberget / Falun area
 const CENTER_LAT = 60.608;
 const START_ZOOM = 13;
@@ -180,8 +185,9 @@ const map = new maplibregl.Map({
         data: 'http://localhost:8080/tiles/coverage.geojson',
       },
       osmvec: {
-        type: 'geojson',
-        data: 'http://localhost:8080/tiles/osm.geojson',
+        type: 'vector',
+        url: 'pmtiles://http://localhost:8080/tiles/dalarna.pmtiles',
+        attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
       },
     },
     layers: [
@@ -195,37 +201,48 @@ const map = new maplibregl.Map({
         }
       },
       // --- OSM vector overlay ---
+      // Landuse fill (forest, farmland …)
+      { id: 'osm-landuse', type: 'fill', source: 'osmvec', 'source-layer': 'landuse', minzoom: 9,
+        paint: { 'fill-color': ['match', ['get', 'landuse'],
+            'forest', '#2d4a2d', 'wood', '#2d4a2d',
+            'farmland', '#6b7a3a', 'meadow', '#4a6b3a',
+            'wetland', '#3a5a6b', 'heath', '#5a4a3a',
+            '#333'
+          ], 'fill-opacity': 0.35 },
+      },
+      // Water polygons
+      { id: 'osm-water', type: 'fill', source: 'osmvec', 'source-layer': 'water', minzoom: 6,
+        paint: { 'fill-color': '#2a5f7a', 'fill-opacity': 0.7 },
+      },
+      // Buildings
+      { id: 'osm-buildings', type: 'fill', source: 'osmvec', 'source-layer': 'buildings', minzoom: 14,
+        paint: { 'fill-color': '#555', 'fill-opacity': 0.6 },
+      },
       // Motor roads — casing
-      { id: 'osm-road-casing', type: 'line', source: 'osmvec', minzoom: 9,
-        filter: ['in', ['get', 'highway'], ['literal',
-          ['primary','secondary','tertiary','residential','unclassified','service']]],
+      { id: 'osm-road-casing', type: 'line', source: 'osmvec', 'source-layer': 'roads', minzoom: 9,
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: { 'line-color': '#222', 'line-width': ['interpolate', ['linear'], ['zoom'],
           10, 2, 14, 5, 16, 8], 'line-opacity': 0.7 },
       },
       // Motor roads — fill
-      { id: 'osm-road-fill', type: 'line', source: 'osmvec', minzoom: 9,
-        filter: ['in', ['get', 'highway'], ['literal',
-          ['primary','secondary','tertiary','residential','unclassified','service']]],
+      { id: 'osm-road-fill', type: 'line', source: 'osmvec', 'source-layer': 'roads', minzoom: 9,
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: { 'line-color': '#fff', 'line-width': ['interpolate', ['linear'], ['zoom'],
           10, 1, 14, 3, 16, 5], 'line-opacity': 0.85 },
       },
       // Tracks
-      { id: 'osm-track', type: 'line', source: 'osmvec', minzoom: 11,
-        filter: ['==', ['get', 'highway'], 'track'],
+      { id: 'osm-track', type: 'line', source: 'osmvec', 'source-layer': 'tracks', minzoom: 11,
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: { 'line-color': '#d4a853', 'line-width': ['interpolate', ['linear'], ['zoom'],
           11, 0.5, 14, 2, 16, 3], 'line-opacity': 0.9 },
       },
       // Paths, footways, cycleways — coloured by mtb:scale where available
-      { id: 'osm-path', type: 'line', source: 'osmvec', minzoom: 12,
-        filter: ['in', ['get', 'highway'], ['literal', ['path','footway','cycleway','bridleway']]],
+      { id: 'osm-path', type: 'line', source: 'osmvec', 'source-layer': 'paths', minzoom: 12,
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
           'line-width': ['interpolate', ['linear'], ['zoom'], 12, 0.5, 14, 2, 16, 3],
           'line-opacity': 0.95,
-          'line-color': ['match', ['get', 'mtb:scale'],
+          'line-color': ['match', ['get', 'mtb_scale'],
             '0',  '#4caf50',
             '1',  '#2196f3',
             '1+', '#1565c0',
@@ -235,12 +252,51 @@ const map = new maplibregl.Map({
           ],
         },
       },
-      // Streams / waterways
-      { id: 'osm-stream', type: 'line', source: 'osmvec', minzoom: 11,
-        filter: ['has', 'waterway'],
+      // Waterways
+      { id: 'osm-waterway', type: 'line', source: 'osmvec', 'source-layer': 'waterways', minzoom: 11,
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: { 'line-color': '#5ab4d4', 'line-width': ['interpolate', ['linear'], ['zoom'],
           11, 0.5, 14, 1.5, 16, 2.5], 'line-opacity': 0.85 },
+      },
+      // Railways
+      { id: 'osm-railway', type: 'line', source: 'osmvec', 'source-layer': 'railways', minzoom: 8,
+        layout: { 'line-join': 'round', 'line-cap': 'butt' },
+        paint: { 'line-color': '#888', 'line-width': ['interpolate', ['linear'], ['zoom'],
+          8, 1, 14, 3], 'line-dasharray': [3, 2] },
+      },
+      // Power lines
+      { id: 'osm-power', type: 'line', source: 'osmvec', 'source-layer': 'powerlines', minzoom: 11,
+        paint: { 'line-color': '#cc0', 'line-width': 1, 'line-opacity': 0.5 },
+      },
+      // Natural lines (cliffs etc.)
+      { id: 'osm-natural-lines', type: 'line', source: 'osmvec', 'source-layer': 'natural_lines', minzoom: 12,
+        paint: { 'line-color': '#a0522d', 'line-width': 1.5, 'line-opacity': 0.8 },
+      },
+      // Peak labels
+      { id: 'osm-peaks', type: 'symbol', source: 'osmvec', 'source-layer': 'peaks', minzoom: 10,
+        layout: {
+          'text-field': ['coalesce', ['get', 'name'], '▲'],
+          'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 10, 10, 14, 13],
+          'text-offset': [0, 0.8],
+          'text-anchor': 'top',
+          'icon-image': '',
+          'symbol-z-elevate': true,
+        },
+        paint: { 'text-color': '#fff', 'text-halo-color': '#000', 'text-halo-width': 1.5 },
+      },
+      // Place labels
+      { id: 'osm-places', type: 'symbol', source: 'osmvec', 'source-layer': 'places', minzoom: 7,
+        layout: {
+          'text-field': ['get', 'name'],
+          'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
+          'text-size': ['match', ['get', 'place'],
+            'city', 16, 'town', 13, 'village', 11, 10],
+          'text-anchor': 'center',
+          'symbol-z-elevate': true,
+        },
+        paint: { 'text-color': '#fff', 'text-halo-color': '#222', 'text-halo-width': 1.5,
+                 'text-opacity': ['interpolate', ['linear'], ['zoom'], 7, 0.7, 12, 1.0] },
       },
       // grey-out everything outside the tile coverage
       { id: 'coverage-mask', type: 'fill', source: 'coverage',
@@ -436,7 +492,12 @@ map.on('mouseleave', () => {
 // ---------------------------------------------------------------------------
 // OSM vector toggle
 // ---------------------------------------------------------------------------
-const OSM_LAYERS = ['osm-road-casing','osm-road-fill','osm-track','osm-path','osm-stream'];
+const OSM_LAYERS = [
+  'osm-landuse','osm-water','osm-buildings',
+  'osm-road-casing','osm-road-fill','osm-track','osm-path',
+  'osm-waterway','osm-railway','osm-power','osm-natural-lines',
+  'osm-peaks','osm-places',
+];
 
 document.getElementById('toggle-osm').addEventListener('change', e => {
   const vis = e.target.checked ? 'visible' : 'none';
