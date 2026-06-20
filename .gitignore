@@ -7,6 +7,9 @@
 *.tiff
 dtm/
 
+# OSM downloads
+osm/
+
 # Generated tile pyramid
 viewer/tiles/
 

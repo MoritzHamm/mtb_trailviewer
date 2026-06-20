@@ -196,7 +196,7 @@ const map = new maplibregl.Map({
       },
       // --- OSM vector overlay ---
       // Motor roads — casing
-      { id: 'osm-road-casing', type: 'line', source: 'osmvec',
+      { id: 'osm-road-casing', type: 'line', source: 'osmvec', minzoom: 9,
         filter: ['in', ['get', 'highway'], ['literal',
           ['primary','secondary','tertiary','residential','unclassified','service']]],
         layout: { 'line-join': 'round', 'line-cap': 'round' },
@@ -204,7 +204,7 @@ const map = new maplibregl.Map({
           10, 2, 14, 5, 16, 8], 'line-opacity': 0.7 },
       },
       // Motor roads — fill
-      { id: 'osm-road-fill', type: 'line', source: 'osmvec',
+      { id: 'osm-road-fill', type: 'line', source: 'osmvec', minzoom: 9,
         filter: ['in', ['get', 'highway'], ['literal',
           ['primary','secondary','tertiary','residential','unclassified','service']]],
         layout: { 'line-join': 'round', 'line-cap': 'round' },
@@ -212,35 +212,35 @@ const map = new maplibregl.Map({
           10, 1, 14, 3, 16, 5], 'line-opacity': 0.85 },
       },
       // Tracks
-      { id: 'osm-track', type: 'line', source: 'osmvec',
+      { id: 'osm-track', type: 'line', source: 'osmvec', minzoom: 11,
         filter: ['==', ['get', 'highway'], 'track'],
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: { 'line-color': '#d4a853', 'line-width': ['interpolate', ['linear'], ['zoom'],
-          10, 0.5, 14, 2, 16, 3], 'line-opacity': 0.9 },
+          11, 0.5, 14, 2, 16, 3], 'line-opacity': 0.9 },
       },
       // Paths, footways, cycleways — coloured by mtb:scale where available
-      { id: 'osm-path', type: 'line', source: 'osmvec',
+      { id: 'osm-path', type: 'line', source: 'osmvec', minzoom: 12,
         filter: ['in', ['get', 'highway'], ['literal', ['path','footway','cycleway','bridleway']]],
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
-          'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 14, 2, 16, 3],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 12, 0.5, 14, 2, 16, 3],
           'line-opacity': 0.95,
           'line-color': ['match', ['get', 'mtb:scale'],
-            '0',  '#4caf50',   // green — easy
-            '1',  '#2196f3',   // blue  — moderate
-            '1+', '#1565c0',   // dark blue
-            '2',  '#e53935',   // red   — hard
-            '3',  '#880e4f',   // purple — expert
-            '#aaaaaa',         // no scale tag — grey
+            '0',  '#4caf50',
+            '1',  '#2196f3',
+            '1+', '#1565c0',
+            '2',  '#e53935',
+            '3',  '#880e4f',
+            '#aaaaaa',
           ],
         },
       },
       // Streams / waterways
-      { id: 'osm-stream', type: 'line', source: 'osmvec',
+      { id: 'osm-stream', type: 'line', source: 'osmvec', minzoom: 11,
         filter: ['has', 'waterway'],
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: { 'line-color': '#5ab4d4', 'line-width': ['interpolate', ['linear'], ['zoom'],
-          10, 0.5, 14, 1.5, 16, 2.5], 'line-opacity': 0.85 },
+          11, 0.5, 14, 1.5, 16, 2.5], 'line-opacity': 0.85 },
       },
       // grey-out everything outside the tile coverage
       { id: 'coverage-mask', type: 'fill', source: 'coverage',
