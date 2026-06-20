@@ -1,36 +1,33 @@
 #!/usr/bin/env bash
-# Download OpenMapTiles PBF font files for self-hosting.
-# After running, the glyphs URL in index.html can be changed to:
-#   http://localhost:8080/fonts/{fontstack}/{range}.pbf
+# Download OpenMapTiles PBF fonts for self-hosting in the viewer.
+# Fonts land in viewer/fonts/{Font Name}/{range}.pbf
 set -euo pipefail
 
 FONTS_DIR="/home/mo/lidar/viewer/fonts"
+TMP=$(mktemp -d)
+
+echo "Downloading OpenMapTiles fonts zip …"
+curl -L \
+  "https://github.com/openmaptiles/fonts/releases/download/v2.0/noto-open-sans.zip" \
+  -o "$TMP/fonts.zip"
+
+echo "Extracting …"
+unzip -q "$TMP/fonts.zip" -d "$TMP/extracted"
+
+echo "Copying needed fonts to $FONTS_DIR/"
 mkdir -p "$FONTS_DIR"
-
-# Font names needed by the viewer
-FONTS=("Open Sans Regular" "Open Sans Bold")
-
-# OpenMapTiles fonts GitHub release
-BASE="https://github.com/openmaptiles/fonts/releases/latest/download"
-
-for FONT in "${FONTS[@]}"; do
-  ENCODED="${FONT// /%20}"
-  DIR="$FONTS_DIR/$FONT"
-  mkdir -p "$DIR"
-  echo "Downloading: $FONT"
-  # Unicode ranges: 0-255, 256-511, … up to 65280-65535 (256 files)
-  for START in $(seq 0 256 65280); do
-    END=$((START + 255))
-    FILE="$DIR/${START}-${END}.pbf"
-    if [ ! -f "$FILE" ]; then
-      curl -sfL "${BASE}/${ENCODED}/${START}-${END}.pbf" -o "$FILE" || true
-    fi
-  done
-  COUNT=$(ls "$DIR"/*.pbf 2>/dev/null | wc -l)
-  echo "  $COUNT PBF files in $DIR"
+for FONT in "Open Sans Regular" "Open Sans Bold"; do
+  SRC="$TMP/extracted/$FONT"
+  if [ -d "$SRC" ]; then
+    rm -rf "$FONTS_DIR/$FONT"
+    cp -r "$SRC" "$FONTS_DIR/$FONT"
+    COUNT=$(ls "$FONTS_DIR/$FONT"/*.pbf 2>/dev/null | wc -l)
+    echo "  $FONT: $COUNT range files"
+  else
+    echo "  WARNING: $FONT not found in zip — available fonts:"
+    ls "$TMP/extracted/" | head -20
+  fi
 done
 
-echo ""
-echo "Done. Now update index.html:"
-echo "  glyphs: 'http://localhost:8080/fonts/{fontstack}/{range}.pbf'"
-echo "  and re-enable the osm-peaks and osm-places layers."
+rm -rf "$TMP"
+echo "Done."

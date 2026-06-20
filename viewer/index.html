@@ -162,7 +162,7 @@ const map = new maplibregl.Map({
   container: 'map',
   style: {
     version: 8,
-    glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+    glyphs: 'http://localhost:8080/fonts/{fontstack}/{range}.pbf',
     sources: {
       osm: {
         type: 'raster',
@@ -272,9 +272,29 @@ const map = new maplibregl.Map({
       { id: 'osm-natural-lines', type: 'line', source: 'osmvec', 'source-layer': 'natural_lines', minzoom: 12,
         paint: { 'line-color': '#a0522d', 'line-width': 1.5, 'line-opacity': 0.8 },
       },
-      // Peak + place labels: disabled until fonts are self-hosted
-      // (demotiles.maplibre.org/font/ does not serve these glyphs)
-      // Re-enable after running: bash /home/mo/lidar/download_fonts.sh
+      // Peak labels
+      { id: 'osm-peaks', type: 'symbol', source: 'osmvec', 'source-layer': 'peaks', minzoom: 10,
+        layout: {
+          'text-field': ['coalesce', ['get', 'name'], '▲'],
+          'text-font': ['Open Sans Bold'],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 10, 10, 14, 13],
+          'text-offset': [0, 0.8],
+          'text-anchor': 'top',
+        },
+        paint: { 'text-color': '#fff', 'text-halo-color': '#000', 'text-halo-width': 1.5 },
+      },
+      // Place labels
+      { id: 'osm-places', type: 'symbol', source: 'osmvec', 'source-layer': 'places', minzoom: 7,
+        layout: {
+          'text-field': ['get', 'name'],
+          'text-font': ['Open Sans Regular'],
+          'text-size': ['match', ['get', 'place'],
+            'city', 16, 'town', 13, 'village', 11, 10],
+          'text-anchor': 'center',
+        },
+        paint: { 'text-color': '#fff', 'text-halo-color': '#222', 'text-halo-width': 1.5,
+                 'text-opacity': ['interpolate', ['linear'], ['zoom'], 7, 0.7, 12, 1.0] },
+      },
       // grey-out everything outside the tile coverage
       { id: 'coverage-mask', type: 'fill', source: 'coverage',
         filter: ['==', ['get', 'type'], 'mask'],
@@ -473,6 +493,7 @@ const OSM_LAYERS = [
   'osm-landuse','osm-water','osm-buildings',
   'osm-road-casing','osm-road-fill','osm-track','osm-path',
   'osm-waterway','osm-railway','osm-power','osm-natural-lines',
+  'osm-peaks','osm-places',
 ];
 
 document.getElementById('toggle-osm').addEventListener('change', e => {
