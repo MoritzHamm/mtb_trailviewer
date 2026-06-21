@@ -157,6 +157,11 @@
     <input type="checkbox" id="toggle-osm" checked>
   </div>
 
+  <div class="toggle-row">
+    <label for="toggle-slope">Slope colors</label>
+    <input type="checkbox" id="toggle-slope">
+  </div>
+
   <div class="toggle-row" id="vert-row" style="opacity:.4;pointer-events:none">
     <label>Vertical scale</label>
     <span class="val" id="vert-val">1.5×</span>
@@ -174,6 +179,64 @@
 // Register PMTiles protocol so MapLibre can read .pmtiles files directly
 const pmtilesProtocol = new pmtiles.Protocol();
 maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile.bind(pmtilesProtocol));
+
+// ---------------------------------------------------------------------------
+// Slope overlay protocol — computes slope from terrain-RGB tiles in the browser
+// Returns a blue (flat) → red (steep, ≥50°) colored PNG tile
+// ---------------------------------------------------------------------------
+maplibregl.addProtocol('slope', async (params) => {
+  try {
+    const [z, x, y] = params.url.replace('slope://', '').split('/').map(Number);
+    const resp = await fetch(`http://localhost:8080/tiles/${z}/${x}/${y}.png`);
+    if (!resp.ok) throw new Error('not found');
+    const srcBitmap = await createImageBitmap(await resp.blob());
+
+    const S = 256;
+    const srcCtx = new OffscreenCanvas(S, S).getContext('2d');
+    srcCtx.drawImage(srcBitmap, 0, 0);
+    const { data: src } = srcCtx.getImageData(0, 0, S, S);
+
+    // Metres per pixel at tile-centre latitude (Web Mercator)
+    const n = Math.pow(2, z);
+    const latRad = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n)));
+    const mpp = 2 * Math.PI * 6378137 * Math.cos(latRad) / (S * n);
+
+    function ele(r, c) {
+      r = Math.max(0, Math.min(S - 1, r));
+      c = Math.max(0, Math.min(S - 1, c));
+      const i = (r * S + c) * 4;
+      return -10000 + (src[i] * 65536 + src[i + 1] * 256 + src[i + 2]) * 0.1;
+    }
+
+    const out = new ImageData(S, S);
+    const dst = out.data;
+    for (let r = 0; r < S; r++) {
+      for (let c = 0; c < S; c++) {
+        const spanC = (c === 0 || c === S - 1) ? 1 : 2;
+        const spanR = (r === 0 || r === S - 1) ? 1 : 2;
+        const dx = (ele(r, c + 1) - ele(r, c - 1)) / (spanC * mpp);
+        const dy = (ele(r + 1, c) - ele(r - 1, c)) / (spanR * mpp);
+        const deg = Math.atan(Math.sqrt(dx * dx + dy * dy)) * 180 / Math.PI;
+        // 0°=blue · 12.5°=cyan · 25°=green · 37.5°=yellow · ≥50°=red
+        const t = Math.min(deg / 50, 1);
+        let R, G, B;
+        if      (t < 0.25) { R = 0;   G = Math.round(t * 4 * 255);               B = 255; }
+        else if (t < 0.5)  { R = 0;   G = 255;                                    B = Math.round((1 - (t - 0.25) * 4) * 255); }
+        else if (t < 0.75) { R = Math.round((t - 0.5) * 4 * 255);  G = 255;      B = 0; }
+        else               { R = 255; G = Math.round((1 - (t - 0.75) * 4) * 255); B = 0; }
+        const i = (r * S + c) * 4;
+        dst[i] = R; dst[i + 1] = G; dst[i + 2] = B; dst[i + 3] = 255;
+      }
+    }
+
+    const dstCanvas = new OffscreenCanvas(S, S);
+    dstCanvas.getContext('2d').putImageData(out, 0, 0);
+    const blob = await dstCanvas.convertToBlob({ type: 'image/png' });
+    return { data: await blob.arrayBuffer() };
+  } catch (_) {
+    return { data: new ArrayBuffer(0) };
+  }
+});
 
 const CENTER_LNG = 15.625;   // Lövberget / Falun area
 const CENTER_LAT = 60.608;
@@ -212,6 +275,13 @@ const map = new maplibregl.Map({
         type: 'geojson',
         data: 'http://localhost:8080/tiles/coverage.geojson',
       },
+      'slope-tiles': {
+        type: 'raster',
+        tiles: ['slope://{z}/{x}/{y}'],
+        tileSize: 256,
+        minzoom: 8,
+        maxzoom: 15,
+      },
       osmvec: {
         type: 'vector',
         url: 'pmtiles://http://localhost:8080/tiles/dalarna.pmtiles',
@@ -223,6 +293,10 @@ const map = new maplibregl.Map({
       { id: 'bg-osm',       type: 'raster', source: 'osm',       paint: { 'raster-opacity': 1.0 } },
       { id: 'bg-satellite', type: 'raster', source: 'satellite', paint: { 'raster-opacity': 1.0 },
         layout: { visibility: 'none' } },
+      { id: 'slope-overlay', type: 'raster', source: 'slope-tiles',
+        layout: { visibility: 'none' },
+        paint: { 'raster-opacity': 0.65, 'raster-fade-duration': 0 },
+      },
       { id: 'hillshade', type: 'hillshade', source: 'terrain', paint: {
           'hillshade-illumination-anchor': 'map',
           'hillshade-illumination-direction': 315,
@@ -341,6 +415,7 @@ const DEFAULTS = {
   azimuth: 315, altitude: 35, exaggeration: 6,
   terrain3d: false, vertEx: 15,
   background: 'osm', osmVectors: true,
+  slope: false,
 };
 
 function saveSetting(key, value) {
@@ -362,7 +437,8 @@ const exSlider   = document.getElementById('exaggeration');
 const vertSlider = document.getElementById('vert-ex');
 const toggle3d   = document.getElementById('toggle-3d');
 const bgSelect   = document.getElementById('bg-select');
-const toggleOsm  = document.getElementById('toggle-osm');
+const toggleOsm   = document.getElementById('toggle-osm');
+const toggleSlope = document.getElementById('toggle-slope');
 const azVal      = document.getElementById('az-val');
 const altVal     = document.getElementById('alt-val');
 const exVal      = document.getElementById('ex-val');
@@ -373,9 +449,10 @@ azSlider.value   = loadSetting('azimuth');
 altSlider.value  = loadSetting('altitude');
 exSlider.value   = loadSetting('exaggeration');
 vertSlider.value = loadSetting('vertEx');
-toggle3d.checked = loadSetting('terrain3d');
-bgSelect.value   = loadSetting('background');
-toggleOsm.checked = loadSetting('osmVectors');
+toggle3d.checked    = loadSetting('terrain3d');
+bgSelect.value      = loadSetting('background');
+toggleOsm.checked   = loadSetting('osmVectors');
+toggleSlope.checked = loadSetting('slope');
 
 // Sync display labels to restored values
 azVal.textContent  = azSlider.value + '°';
@@ -579,6 +656,11 @@ const OSM_LAYERS = [
   'osm-peaks-tri','osm-peaks-label','osm-places',
 ];
 
+toggleSlope.addEventListener('change', () => {
+  map.setLayoutProperty('slope-overlay', 'visibility', toggleSlope.checked ? 'visible' : 'none');
+  saveSetting('slope', toggleSlope.checked);
+});
+
 document.getElementById('toggle-osm').addEventListener('change', e => {
   const vis = e.target.checked ? 'visible' : 'none';
   OSM_LAYERS.forEach(id => {
@@ -636,6 +718,9 @@ map.on('load', () => {
   if (loadSetting('terrain3d')) {
     map.setTerrain({ source: 'terrain', exaggeration: parseInt(vertSlider.value) / 10 });
     map.setPitch(50);
+  }
+  if (loadSetting('slope')) {
+    map.setLayoutProperty('slope-overlay', 'visibility', 'visible');
   }
 
   map.addLayer({
