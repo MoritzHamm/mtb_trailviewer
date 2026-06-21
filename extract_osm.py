@@ -168,6 +168,36 @@ def _write(features: list[dict], path: Path) -> None:
     print(f"  {path.name}: {len(gdf)}")
 
 
+def _fill_peak_elevations(peaks: list[dict], dtm_vrt: Path) -> None:
+    """Sample DTM elevation for any peak missing an 'ele' tag."""
+    import rasterio
+    from pyproj import Transformer
+
+    missing = [p for p in peaks if not p.get("ele")]
+    if not missing:
+        return
+    if not dtm_vrt.exists():
+        print(f"  (DTM not found at {dtm_vrt} — skipping elevation fill)")
+        return
+
+    t = Transformer.from_crs("EPSG:4326", "EPSG:3006", always_xy=True)
+    with rasterio.open(dtm_vrt) as src:
+        for p in missing:
+            lon = p["geometry"].x
+            lat = p["geometry"].y
+            x, y = t.transform(lon, lat)
+            row, col = src.index(x, y)
+            try:
+                val = src.read(1)[row, col]
+                if val != src.nodata and not (val != val):  # not nodata, not NaN
+                    p["ele"] = str(round(float(val)))
+            except Exception:
+                pass
+
+    filled = sum(1 for p in missing if p.get("ele"))
+    print(f"  DTM elevation filled for {filled}/{len(missing)} peaks without OSM ele")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -177,6 +207,8 @@ def main() -> None:
                         help="Bounding box in SWEREF99TM / EPSG:3006")
     parser.add_argument("--pbf", default=PBF_DEFAULT)
     parser.add_argument("--out", default=str(OUT_DEFAULT))
+    parser.add_argument("--dtm", default="/home/mo/lidar/dtm/merged.vrt",
+                        help="DTM VRT for filling missing peak elevations")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -202,6 +234,7 @@ def main() -> None:
     _write(h.railways,      out / "railways.geojson")
     _write(h.powerlines,    out / "powerlines.geojson")
     _write(h.natural_lines, out / "natural_lines.geojson")
+    _fill_peak_elevations(h.peaks, Path(args.dtm))
     _write(h.peaks,         out / "peaks.geojson")
     _write(h.places,        out / "places.geojson")
     print("\nDone. Run extract_osm_polygons.py next for water/landuse/buildings.")

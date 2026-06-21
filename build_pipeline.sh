@@ -76,15 +76,24 @@ if [ "$SKIP_TILES" = false ]; then
   echo "Step 3: Building PMTiles with tippecanoe"
   echo "========================================"
 
-  # Collect -L args for each layer that exists
+  # Layers subject to density-based dropping (lines + polygons)
   LAYER_ARGS=()
   for layer in roads tracks paths waterways railways powerlines natural_lines \
-               water landuse buildings peaks places; do
+               water landuse buildings; do
     f="$LAYERS/${layer}.geojson"
     if [ -f "$f" ]; then
       LAYER_ARGS+=("-L" "${layer}:${f}")
     else
       echo "  Skipping missing layer: $layer"
+    fi
+  done
+
+  # Point layers: never drop — every peak and place matters
+  POINT_ARGS=()
+  for layer in peaks places; do
+    f="$LAYERS/${layer}.geojson"
+    if [ -f "$f" ]; then
+      POINT_ARGS+=("--no-feature-limit" "--no-tile-size-limit" "-L" "${layer}:${f}")
     fi
   done
 
@@ -96,7 +105,8 @@ if [ "$SKIP_TILES" = false ]; then
     --drop-densest-as-needed \
     --extend-zooms-if-still-dropping \
     --read-parallel \
-    "${LAYER_ARGS[@]}"
+    "${LAYER_ARGS[@]}" \
+    "${POINT_ARGS[@]}"
 
   echo "PMTiles written: $PMTILES"
 else

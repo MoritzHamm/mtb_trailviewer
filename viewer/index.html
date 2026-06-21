@@ -303,17 +303,8 @@ const map = new maplibregl.Map({
       { id: 'osm-natural-lines', type: 'line', source: 'osmvec', 'source-layer': 'natural_lines', minzoom: 12,
         paint: { 'line-color': '#a0522d', 'line-width': 1.5, 'line-opacity': 0.8 },
       },
-      // Peak labels
-      { id: 'osm-peaks', type: 'symbol', source: 'osmvec', 'source-layer': 'peaks', minzoom: 10,
-        layout: {
-          'text-field': ['coalesce', ['get', 'name'], '▲'],
-          'text-font': ['Open Sans Bold'],
-          'text-size': ['interpolate', ['linear'], ['zoom'], 10, 10, 14, 13],
-          'text-offset': [0, 0.8],
-          'text-anchor': 'top',
-        },
-        paint: { 'text-color': '#fff', 'text-halo-color': '#000', 'text-halo-width': 1.5 },
-      },
+      // Peak layers added dynamically in map.on('load') below
+      // (triangle uses a canvas image — Open Sans Bold lacks the ▲ glyph)
       // Place labels
       { id: 'osm-places', type: 'symbol', source: 'osmvec', 'source-layer': 'places', minzoom: 7,
         layout: {
@@ -538,7 +529,7 @@ const OSM_LAYERS = [
   'osm-landuse','osm-water','osm-buildings',
   'osm-road-casing','osm-road-fill','osm-track','osm-path',
   'osm-waterway','osm-railway','osm-power','osm-natural-lines',
-  'osm-peaks','osm-places',
+  'osm-peaks-tri','osm-peaks-label','osm-places',
 ];
 
 document.getElementById('toggle-osm').addEventListener('change', e => {
@@ -549,6 +540,77 @@ document.getElementById('toggle-osm').addEventListener('change', e => {
   // if map already idle, set immediately too
   OSM_LAYERS.forEach(id => {
     try { map.setLayoutProperty(id, 'visibility', vis); } catch (_) {}
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Peak layers — added after load so we can register a canvas triangle image
+// (Open Sans Bold lacks the ▲ glyph; icon-image is more reliable)
+// ---------------------------------------------------------------------------
+map.on('load', () => {
+  // Draw an orange triangle into a raw pixel buffer
+  const sz = 22;
+  const data = new Uint8ClampedArray(sz * sz * 4);
+  for (let y = 2; y < sz - 1; y++) {
+    const t = (y - 2) / (sz - 4);          // 0 = apex, 1 = base
+    const hw = t * (sz / 2 - 1.5);
+    const cx = sz / 2;
+    for (let x = Math.ceil(cx - hw); x <= Math.floor(cx + hw); x++) {
+      const i = (y * sz + x) * 4;
+      data[i]   = 255;   // R
+      data[i+1] = 140;   // G  → #ff8c00
+      data[i+2] = 0;     // B
+      data[i+3] = 230;   // A
+    }
+  }
+  map.addImage('peak-tri', { width: sz, height: sz, data });
+
+  // Triangle icon — visible from Z7, higher peaks win collisions
+  map.addLayer({
+    id: 'osm-peaks-tri',
+    type: 'symbol',
+    source: 'osmvec',
+    'source-layer': 'peaks',
+    minzoom: 7,
+    layout: {
+      'icon-image': 'peak-tri',
+      'icon-size': ['interpolate', ['linear'], ['zoom'], 7, 0.55, 10, 0.75, 14, 1.0],
+      'icon-allow-overlap': false,
+      'symbol-sort-key': ['*', ['to-number', ['get', 'ele'], 0], -1],
+    },
+  });
+
+  // Name + elevation label — appears from Z12, below the icon
+  map.addLayer({
+    id: 'osm-peaks-label',
+    type: 'symbol',
+    source: 'osmvec',
+    'source-layer': 'peaks',
+    minzoom: 12,
+    layout: {
+      'text-field': ['format',
+        ['coalesce', ['get', 'name'], ''], {'font-scale': 1.0},
+        ['case',
+          ['all', ['has', 'ele'],
+                  ['!=', ['get', 'ele'], null],
+                  ['!=', ['get', 'ele'], '']],
+          ['concat', '\n',
+            ['to-string', ['round', ['to-number', ['get', 'ele'], 0]]],
+            ' m'],
+          '',
+        ], {'font-scale': 0.85},
+      ],
+      'text-font': ['Open Sans Bold'],
+      'text-size': 11,
+      'text-anchor': 'top',
+      'text-offset': [0, 0.9],
+      'symbol-sort-key': ['*', ['to-number', ['get', 'ele'], 0], -1],
+    },
+    paint: {
+      'text-color': '#ff8c00',
+      'text-halo-color': 'rgba(0,0,0,0.8)',
+      'text-halo-width': 1.5,
+    },
   });
 });
 
