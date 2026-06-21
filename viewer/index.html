@@ -65,6 +65,20 @@
 
     input[type=checkbox] { accent-color: #5ba4cf; width: 15px; height: 15px; cursor: pointer; }
 
+    select {
+      background: #2a2a2a;
+      color: #e8e8e8;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 3px 6px;
+      font-size: 12px;
+      cursor: pointer;
+      outline: none;
+      width: 100%;
+      margin-bottom: 8px;
+    }
+    select:focus { border-color: #5ba4cf; }
+
     /* ---- status bar ---- */
     #status {
       position: absolute;
@@ -126,13 +140,20 @@
 
   <hr class="sep">
 
+  <div class="row"><label>Background</label></div>
+  <select id="bg-select">
+    <option value="osm">OpenStreetMap</option>
+    <option value="satellite">Satellite (Esri)</option>
+    <option value="none">None</option>
+  </select>
+
   <div class="toggle-row">
     <label for="toggle-3d">3D terrain</label>
     <input type="checkbox" id="toggle-3d">
   </div>
 
   <div class="toggle-row">
-    <label for="toggle-osm">OSM roads</label>
+    <label for="toggle-osm">OSM vectors</label>
     <input type="checkbox" id="toggle-osm" checked>
   </div>
 
@@ -171,6 +192,13 @@ const map = new maplibregl.Map({
         attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
         maxzoom: 19,
       },
+      satellite: {
+        type: 'raster',
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+        tileSize: 256,
+        attribution: '© Esri, Maxar, Earthstar Geographics',
+        maxzoom: 19,
+      },
       terrain: {
         type: 'raster-dem',
         tiles: ['http://localhost:8080/tiles/{z}/{x}/{y}.png'],
@@ -191,7 +219,10 @@ const map = new maplibregl.Map({
       },
     },
     layers: [
-      { id: 'osm', type: 'raster', source: 'osm', paint: { 'raster-opacity': 1.0 } },
+      { id: 'bg-solid', type: 'background', paint: { 'background-color': '#2a2e35' } },
+      { id: 'bg-osm',       type: 'raster', source: 'osm',       paint: { 'raster-opacity': 1.0 } },
+      { id: 'bg-satellite', type: 'raster', source: 'satellite', paint: { 'raster-opacity': 1.0 },
+        layout: { visibility: 'none' } },
       { id: 'hillshade', type: 'hillshade', source: 'terrain', paint: {
           'hillshade-illumination-anchor': 'map',
           'hillshade-illumination-direction': 315,
@@ -484,6 +515,20 @@ map.on('mousemove', e => {
 
 map.on('mouseleave', () => {
   status.textContent = 'Move mouse over the map';
+});
+
+// ---------------------------------------------------------------------------
+// Background selector
+// ---------------------------------------------------------------------------
+const BG_LAYERS = { osm: 'bg-osm', satellite: 'bg-satellite' };
+
+document.getElementById('bg-select').addEventListener('change', e => {
+  const chosen = e.target.value;
+  map.once('idle', () => {
+    Object.entries(BG_LAYERS).forEach(([key, id]) => {
+      map.setLayoutProperty(id, 'visibility', key === chosen ? 'visible' : 'none');
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
