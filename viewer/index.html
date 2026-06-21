@@ -335,17 +335,71 @@ const map = new maplibregl.Map({
 });
 
 // ---------------------------------------------------------------------------
+// Settings persistence
+// ---------------------------------------------------------------------------
+const DEFAULTS = {
+  azimuth: 315, altitude: 35, exaggeration: 6,
+  terrain3d: false, vertEx: 15,
+  background: 'osm', osmVectors: true,
+};
+
+function saveSetting(key, value) {
+  try { localStorage.setItem('tv_' + key, JSON.stringify(value)); } catch(e) {}
+}
+function loadSetting(key) {
+  try {
+    const v = localStorage.getItem('tv_' + key);
+    return v !== null ? JSON.parse(v) : DEFAULTS[key];
+  } catch(e) { return DEFAULTS[key]; }
+}
+
+// ---------------------------------------------------------------------------
 // Controls → map
 // ---------------------------------------------------------------------------
-const azSlider  = document.getElementById('azimuth');
-const altSlider = document.getElementById('altitude');
-const exSlider  = document.getElementById('exaggeration');
+const azSlider   = document.getElementById('azimuth');
+const altSlider  = document.getElementById('altitude');
+const exSlider   = document.getElementById('exaggeration');
 const vertSlider = document.getElementById('vert-ex');
-const toggle3d  = document.getElementById('toggle-3d');
-const azVal     = document.getElementById('az-val');
-const altVal    = document.getElementById('alt-val');
-const exVal     = document.getElementById('ex-val');
-const vertVal   = document.getElementById('vert-val');
+const toggle3d   = document.getElementById('toggle-3d');
+const bgSelect   = document.getElementById('bg-select');
+const toggleOsm  = document.getElementById('toggle-osm');
+const azVal      = document.getElementById('az-val');
+const altVal     = document.getElementById('alt-val');
+const exVal      = document.getElementById('ex-val');
+const vertVal    = document.getElementById('vert-val');
+
+// Restore UI from storage
+azSlider.value   = loadSetting('azimuth');
+altSlider.value  = loadSetting('altitude');
+exSlider.value   = loadSetting('exaggeration');
+vertSlider.value = loadSetting('vertEx');
+toggle3d.checked = loadSetting('terrain3d');
+bgSelect.value   = loadSetting('background');
+toggleOsm.checked = loadSetting('osmVectors');
+
+// Sync display labels to restored values
+azVal.textContent  = azSlider.value + '°';
+altVal.textContent = altSlider.value + '°';
+exVal.textContent  = (parseInt(exSlider.value) / 10).toFixed(1);
+vertVal.textContent = (parseInt(vertSlider.value) / 10).toFixed(1) + '×';
+
+// Restore vert-scale row opacity
+{
+  const on = toggle3d.checked;
+  const vertRow = document.getElementById('vert-row');
+  vertRow.style.opacity       = on ? '1' : '.4';
+  vertRow.style.pointerEvents = on ? '' : 'none';
+  vertSlider.style.opacity       = on ? '1' : '.4';
+  vertSlider.style.pointerEvents = on ? '' : 'none';
+}
+
+function applyAltitude() {
+  const t = parseInt(altSlider.value) / 85;
+  map.setPaintProperty('hillshade', 'hillshade-shadow-color',
+    `hsl(240, 15%, ${Math.round(20 + t * 30)}%)`);
+  map.setPaintProperty('hillshade', 'hillshade-highlight-color',
+    `hsl(45, 30%, ${Math.round(95 + t * 4)}%)`);
+}
 
 function updateHillshade() {
   const az = parseInt(azSlider.value);
@@ -359,28 +413,20 @@ function updateHillshade() {
 
 altSlider.addEventListener('input', () => {
   altVal.textContent = altSlider.value + '°';
-  // MapLibre's hillshade layer doesn't expose altitude natively;
-  // we modulate shadow/highlight colours to simulate it.
-  const t = parseInt(altSlider.value) / 85;          // 0 = low sun, 1 = zenith
-  const shadowL  = Math.round(20 + t * 30);          // brighter shadow at high sun
-  const highlightL = Math.round(95 + t * 4);
-  map.setPaintProperty('hillshade', 'hillshade-shadow-color',
-    `hsl(240, 15%, ${shadowL}%)`);
-  map.setPaintProperty('hillshade', 'hillshade-highlight-color',
-    `hsl(45, 30%, ${highlightL}%)`);
+  applyAltitude();
+  saveSetting('altitude', altSlider.value);
 });
 
-azSlider.addEventListener('input', updateHillshade);
-exSlider.addEventListener('input', updateHillshade);
+azSlider.addEventListener('input', () => { updateHillshade(); saveSetting('azimuth', azSlider.value); });
+exSlider.addEventListener('input', () => { updateHillshade(); saveSetting('exaggeration', exSlider.value); });
 
 toggle3d.addEventListener('change', () => {
   const on = toggle3d.checked;
   const vertRow = document.getElementById('vert-row');
-  vertRow.style.opacity     = on ? '1' : '.4';
+  vertRow.style.opacity       = on ? '1' : '.4';
   vertRow.style.pointerEvents = on ? '' : 'none';
-  vertSlider.style.opacity  = on ? '1' : '.4';
+  vertSlider.style.opacity       = on ? '1' : '.4';
   vertSlider.style.pointerEvents = on ? '' : 'none';
-
   if (on) {
     map.setTerrain({ source: 'terrain', exaggeration: parseInt(vertSlider.value) / 10 });
     map.easeTo({ pitch: 50, duration: 600 });
@@ -388,12 +434,14 @@ toggle3d.addEventListener('change', () => {
     map.setTerrain(null);
     map.easeTo({ pitch: 0, duration: 600 });
   }
+  saveSetting('terrain3d', on);
 });
 
 vertSlider.addEventListener('input', () => {
   const v = parseInt(vertSlider.value) / 10;
   vertVal.textContent = v.toFixed(1) + '×';
   if (toggle3d.checked) map.setTerrain({ source: 'terrain', exaggeration: v });
+  saveSetting('vertEx', vertSlider.value);
 });
 
 // ---------------------------------------------------------------------------
@@ -515,11 +563,10 @@ const BG_LAYERS = { osm: 'bg-osm', satellite: 'bg-satellite' };
 
 document.getElementById('bg-select').addEventListener('change', e => {
   const chosen = e.target.value;
-  map.once('idle', () => {
-    Object.entries(BG_LAYERS).forEach(([key, id]) => {
-      map.setLayoutProperty(id, 'visibility', key === chosen ? 'visible' : 'none');
-    });
+  Object.entries(BG_LAYERS).forEach(([key, id]) => {
+    map.setLayoutProperty(id, 'visibility', key === chosen ? 'visible' : 'none');
   });
+  saveSetting('background', chosen);
 });
 
 // ---------------------------------------------------------------------------
@@ -534,13 +581,10 @@ const OSM_LAYERS = [
 
 document.getElementById('toggle-osm').addEventListener('change', e => {
   const vis = e.target.checked ? 'visible' : 'none';
-  map.once('idle', () => {
-    OSM_LAYERS.forEach(id => map.setLayoutProperty(id, 'visibility', vis));
-  });
-  // if map already idle, set immediately too
   OSM_LAYERS.forEach(id => {
-    try { map.setLayoutProperty(id, 'visibility', vis); } catch (_) {}
+    try { map.setLayoutProperty(id, 'visibility', vis); } catch(_) {}
   });
+  saveSetting('osmVectors', e.target.checked);
 });
 
 // ---------------------------------------------------------------------------
@@ -581,6 +625,19 @@ map.on('load', () => {
   });
 
   // Name + elevation label — appears from Z12, below the icon
+  // Apply restored settings to the map now that style + layers are ready
+  updateHillshade();
+  applyAltitude();
+  const savedBg = loadSetting('background');
+  Object.entries(BG_LAYERS).forEach(([key, id]) =>
+    map.setLayoutProperty(id, 'visibility', key === savedBg ? 'visible' : 'none'));
+  const osmVis = loadSetting('osmVectors') ? 'visible' : 'none';
+  OSM_LAYERS.forEach(id => { try { map.setLayoutProperty(id, 'visibility', osmVis); } catch(_) {} });
+  if (loadSetting('terrain3d')) {
+    map.setTerrain({ source: 'terrain', exaggeration: parseInt(vertSlider.value) / 10 });
+    map.setPitch(50);
+  }
+
   map.addLayer({
     id: 'osm-peaks-label',
     type: 'symbol',
