@@ -7,110 +7,19 @@
   <script src="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.js"></script>
   <link   href="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.css" rel="stylesheet">
   <script src="https://unpkg.com/pmtiles@3.2.0/dist/pmtiles.js"></script>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-
-    body { font-family: system-ui, sans-serif; background: #1a1a1a; }
-
-    #map { position: absolute; inset: 0; }
-
-    /* ---- control panel ---- */
-    #controls {
-      position: absolute;
-      top: 12px; right: 12px;
-      background: rgba(20, 20, 20, 0.88);
-      backdrop-filter: blur(6px);
-      color: #e8e8e8;
-      border-radius: 8px;
-      padding: 14px 16px;
-      width: 220px;
-      font-size: 13px;
-      box-shadow: 0 2px 12px rgba(0,0,0,.5);
-    }
-
-    #controls h2 {
-      font-size: 14px;
-      font-weight: 600;
-      margin-bottom: 12px;
-      color: #fff;
-      letter-spacing: .3px;
-    }
-
-    .row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 10px;
-    }
-
-    .row label { color: #bbb; }
-    .row .val  { color: #fff; font-variant-numeric: tabular-nums; min-width: 38px; text-align: right; }
-
-    input[type=range] {
-      width: 100%;
-      margin: 4px 0 10px;
-      accent-color: #5ba4cf;
-    }
-
-    .sep { border: none; border-top: 1px solid #333; margin: 10px 0; }
-
-    .toggle-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 8px;
-    }
-
-    .toggle-row label { color: #bbb; cursor: pointer; }
-
-    input[type=checkbox] { accent-color: #5ba4cf; width: 15px; height: 15px; cursor: pointer; }
-
-    select {
-      background: #2a2a2a;
-      color: #e8e8e8;
-      border: 1px solid #444;
-      border-radius: 4px;
-      padding: 3px 6px;
-      font-size: 12px;
-      cursor: pointer;
-      outline: none;
-      width: 100%;
-      margin-bottom: 8px;
-    }
-    select:focus { border-color: #5ba4cf; }
-
-    /* ---- status bar ---- */
-    #status {
-      position: absolute;
-      bottom: 8px; left: 50%;
-      transform: translateX(-50%);
-      background: rgba(20, 20, 20, 0.75);
-      color: #ccc;
-      font-size: 12px;
-      padding: 4px 10px;
-      border-radius: 4px;
-      pointer-events: none;
-      white-space: nowrap;
-    }
-
-    /* ---- sun compass ---- */
-    #compass-wrap {
-      display: flex;
-      justify-content: center;
-      margin: 6px 0 10px;
-    }
-
-    #sun-canvas {
-      cursor: pointer;
-      border-radius: 50%;
-      background: radial-gradient(circle, #2a2a40, #111);
-      border: 1px solid #333;
-    }
-  </style>
+  <link href="style.css" rel="stylesheet">
 </head>
 <body>
 
 <div id="map"></div>
+
+<div id="search-wrap">
+  <input id="search-input" type="text" placeholder="Search places…" autocomplete="off" spellcheck="false">
+  <button id="search-clear" title="Clear">✕</button>
+  <div id="search-results">
+    <div id="search-status"></div>
+  </div>
+</div>
 
 <div id="controls">
   <h2>Terrain viewer</h2>
@@ -758,6 +667,131 @@ map.on('load', () => {
 
 // Initial compass draw
 drawCompass(315);
+
+// ---------------------------------------------------------------------------
+// Place search — Nominatim, biased toward Dalarna
+// ---------------------------------------------------------------------------
+const searchInput   = document.getElementById('search-input');
+const searchClear   = document.getElementById('search-clear');
+const searchResults = document.getElementById('search-results');
+const searchStatus  = document.getElementById('search-status');
+
+let searchMarker = null;
+let searchTimer  = null;
+let activeIdx    = -1;
+
+function showResults(items) {
+  searchStatus.style.display = 'none';
+  searchResults.innerHTML = '';
+  searchResults.style.display = items.length ? 'block' : 'none';
+  items.forEach((item, i) => {
+    const el = document.createElement('div');
+    el.className = 'search-item';
+    const name = item.display_name.split(',').slice(0, 2).join(',');
+    const sub  = item.display_name.split(',').slice(2, 4).join(',').trim();
+    el.innerHTML = `${name}<small>${sub}</small>`;
+    el.addEventListener('mousedown', e => { e.preventDefault(); selectResult(item); });
+    searchResults.appendChild(el);
+  });
+  activeIdx = -1;
+}
+
+function setStatus(msg) {
+  searchResults.innerHTML = '';
+  searchResults.appendChild(searchStatus);
+  searchStatus.style.display = 'block';
+  searchStatus.textContent = msg;
+  searchResults.style.display = 'block';
+}
+
+function selectResult(item) {
+  const lng = parseFloat(item.lon);
+  const lat = parseFloat(item.lat);
+  const bb  = item.boundingbox;           // [minlat, maxlat, minlon, maxlon]
+
+  searchInput.value = item.display_name.split(',').slice(0, 2).join(',').trim();
+  searchClear.style.display = 'block';
+  closeDropdown();
+
+  if (searchMarker) searchMarker.remove();
+  searchMarker = new maplibregl.Marker({ color: '#5ba4cf' })
+    .setLngLat([lng, lat])
+    .addTo(map);
+
+  if (bb) {
+    map.fitBounds(
+      [[parseFloat(bb[2]), parseFloat(bb[0])], [parseFloat(bb[3]), parseFloat(bb[1])]],
+      { padding: 80, maxZoom: 15, duration: 800 }
+    );
+  } else {
+    map.flyTo({ center: [lng, lat], zoom: 13, duration: 800 });
+  }
+}
+
+function closeDropdown() {
+  searchResults.style.display = 'none';
+  activeIdx = -1;
+}
+
+async function doSearch(q) {
+  if (q.length < 2) { closeDropdown(); return; }
+  setStatus('Searching…');
+  try {
+    const params = new URLSearchParams({
+      q, format: 'json', limit: 7,
+      countrycodes: 'se',
+      viewbox: '13.0,59.5,16.5,62.5',   // Dalarna bias
+      bounded: '0',
+    });
+    const res  = await fetch(`https://nominatim.openstreetmap.org/search?${params}`,
+                             { headers: { 'Accept-Language': 'sv,en' } });
+    const data = await res.json();
+    if (data.length) showResults(data);
+    else setStatus('No results');
+  } catch(_) {
+    setStatus('Search unavailable');
+  }
+}
+
+searchInput.addEventListener('input', () => {
+  const q = searchInput.value.trim();
+  searchClear.style.display = q ? 'block' : 'none';
+  clearTimeout(searchTimer);
+  if (!q) { closeDropdown(); return; }
+  searchTimer = setTimeout(() => doSearch(q), 300);
+});
+
+searchInput.addEventListener('keydown', e => {
+  const items = searchResults.querySelectorAll('.search-item');
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    activeIdx = Math.min(activeIdx + 1, items.length - 1);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    activeIdx = Math.max(activeIdx - 1, 0);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (activeIdx >= 0 && items[activeIdx]) items[activeIdx].dispatchEvent(new MouseEvent('mousedown'));
+    return;
+  } else if (e.key === 'Escape') {
+    closeDropdown();
+    searchInput.blur();
+    return;
+  }
+  items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+});
+
+searchClear.addEventListener('click', () => {
+  searchInput.value = '';
+  searchClear.style.display = 'none';
+  closeDropdown();
+  if (searchMarker) { searchMarker.remove(); searchMarker = null; }
+  searchInput.focus();
+});
+
+document.addEventListener('click', e => {
+  if (!document.getElementById('search-wrap').contains(e.target)) closeDropdown();
+});
 </script>
 </body>
 </html>
