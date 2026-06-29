@@ -85,9 +85,16 @@
 // ---------------------------------------------------------------------------
 // Map init
 // ---------------------------------------------------------------------------
+// Single source of truth for tile locations — update these for deployment
+const TILE_BASE   = 'http://localhost:8080/tiles';
+const GLYPHS_BASE = 'http://localhost:8080/fonts';
+
 // Register PMTiles protocol so MapLibre can read .pmtiles files directly
 const pmtilesProtocol = new pmtiles.Protocol();
 maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile.bind(pmtilesProtocol));
+
+// Shared PMTiles instance for terrain — reused by the slope protocol below
+const terrainTiles = new pmtiles.PMTiles(`${TILE_BASE}/terrain.pmtiles`);
 
 // ---------------------------------------------------------------------------
 // Slope overlay protocol — computes slope from terrain-RGB tiles in the browser
@@ -96,9 +103,9 @@ maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile.bind(pmtilesProtocol));
 maplibregl.addProtocol('slope', async (params) => {
   try {
     const [z, x, y] = params.url.replace('slope://', '').split('/').map(Number);
-    const resp = await fetch(`http://localhost:8080/tiles/${z}/${x}/${y}.png`);
-    if (!resp.ok) throw new Error('not found');
-    const srcBitmap = await createImageBitmap(await resp.blob());
+    const tile = await terrainTiles.getZxy(z, x, y);
+    if (!tile) throw new Error('not found');
+    const srcBitmap = await createImageBitmap(new Blob([tile.data]));
 
     const S = 256;
     const srcCtx = new OffscreenCanvas(S, S).getContext('2d');
@@ -155,7 +162,7 @@ const map = new maplibregl.Map({
   container: 'map',
   style: {
     version: 8,
-    glyphs: 'http://localhost:8080/fonts/{fontstack}/{range}.pbf',
+    glyphs: `${GLYPHS_BASE}/{fontstack}/{range}.pbf`,
     sources: {
       osm: {
         type: 'raster',
@@ -173,7 +180,7 @@ const map = new maplibregl.Map({
       },
       terrain: {
         type: 'raster-dem',
-        url: 'pmtiles://http://localhost:8080/tiles/terrain.pmtiles',
+        url: `pmtiles://${TILE_BASE}/terrain.pmtiles`,
         tileSize: 256,
         encoding: 'mapbox',
         minzoom: 8,
@@ -182,7 +189,7 @@ const map = new maplibregl.Map({
       },
       coverage: {
         type: 'geojson',
-        data: 'http://localhost:8080/tiles/coverage.geojson',
+        data: `${TILE_BASE}/coverage.geojson`,
       },
       'slope-tiles': {
         type: 'raster',
@@ -193,7 +200,7 @@ const map = new maplibregl.Map({
       },
       osmvec: {
         type: 'vector',
-        url: 'pmtiles://http://localhost:8080/tiles/dalarna.pmtiles',
+        url: `pmtiles://${TILE_BASE}/dalarna.pmtiles`,
         attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
       },
     },
