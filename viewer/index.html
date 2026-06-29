@@ -173,7 +173,7 @@ const map = new maplibregl.Map({
       },
       terrain: {
         type: 'raster-dem',
-        tiles: ['http://localhost:8080/tiles/{z}/{x}/{y}.png'],
+        url: 'pmtiles://http://localhost:8080/tiles/terrain.pmtiles',
         tileSize: 256,
         encoding: 'mapbox',
         minzoom: 8,

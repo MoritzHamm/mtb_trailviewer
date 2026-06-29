@@ -55,8 +55,13 @@ class RangeHTTPRequestHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
 
+        except BrokenPipeError:
+            pass
         except Exception as e:
-            self.send_error(500, str(e))
+            try:
+                self.send_error(500, str(e))
+            except BrokenPipeError:
+                pass
 
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
