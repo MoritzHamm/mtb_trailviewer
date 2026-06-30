@@ -178,6 +178,21 @@ def _tile_worker(args: tuple) -> bool:
 # Main
 # ---------------------------------------------------------------------------
 
+def _scan_existing(out_dir: Path, z: int) -> set:
+    """Return set of (tx, ty) for tiles already on disk at zoom z."""
+    z_dir = out_dir / str(z)
+    if not z_dir.is_dir():
+        return set()
+    found = set()
+    for x_entry in os.scandir(z_dir):
+        if x_entry.is_dir():
+            tx = int(x_entry.name)
+            for y_entry in os.scandir(x_entry.path):
+                if y_entry.name.endswith('.png'):
+                    found.add((tx, int(y_entry.name[:-4])))
+    return found
+
+
 def generate_overlay_tiles(paths: dict, out_dir: Path,
                             zoom_min: int, zoom_max: int) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
