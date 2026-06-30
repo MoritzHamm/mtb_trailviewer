@@ -209,15 +209,14 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
     for z in range(zoom_min, zoom_max + 1):
         all_tiles = list(tiles_for_bounds(west, south, east, north, z))
 
-        existing = [(tx, ty) for tx, ty in all_tiles
-                    if (out_dir / str(z) / str(tx) / f"{ty}.png").exists()]
+        existing_set = _scan_existing(out_dir, z)
         todo = [(paths, tx, ty, z, str(out_dir)) for tx, ty in all_tiles
-                if (tx, ty) not in set(existing)]
+                if (tx, ty) not in existing_set]
 
         print(f"Z{z:02d}  {len(all_tiles)} candidates  "
-              f"{len(existing)} existing  {len(todo)} to generate")
+              f"{len(existing_set)} existing  {len(todo)} to generate")
 
-        total_skipped += len(existing)
+        total_skipped += len(existing_set)
 
         if not todo:
             continue
