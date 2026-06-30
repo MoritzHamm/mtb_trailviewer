@@ -160,6 +160,9 @@ def _tile_worker(args: tuple) -> bool:
     # Skip tile if none of the supplied channels has any coverage
     has_data = any(v is not None for v in channels.values())
     if not has_data:
+        sentinel = Path(out_dir) / str(z) / str(tx) / f"{ty}.empty"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.touch()
         return False
 
     def ch(key):
@@ -169,6 +172,7 @@ def _tile_worker(args: tuple) -> bool:
 
     rgba = np.stack([ch('lrm'), ch('svf'), ch('chm'), ch('wetness')], axis=-1)
 
+    tile_path = Path(out_dir) / str(z) / str(tx) / f"{ty}.png"
     tile_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(rgba, 'RGBA').save(tile_path, compress_level=1)
     return True
@@ -188,8 +192,8 @@ def _scan_existing(out_dir: Path, z: int) -> set:
         if x_entry.is_dir():
             tx = int(x_entry.name)
             for y_entry in os.scandir(x_entry.path):
-                if y_entry.name.endswith('.png'):
-                    found.add((tx, int(y_entry.name[:-4])))
+                if y_entry.name.endswith(('.png', '.empty')):
+                    found.add((tx, int(y_entry.name.rsplit('.', 1)[0])))
     return found
 
 
@@ -210,11 +214,14 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
     if not all_bounds:
         raise RuntimeError("No input files provided.")
 
-    west  = min(b[0] for b in all_bounds)
-    south = min(b[1] for b in all_bounds)
-    east  = max(b[2] for b in all_bounds)
-    north = max(b[3] for b in all_bounds)
-    print(f"\n  Union   : {west:.3f}°E {south:.3f}°N – {east:.3f}°E {north:.3f}°N")
+    # Intersection: only generate tiles where all sources overlap.
+    # Avoids millions of no-data candidates when one source (e.g. wetness)
+    # covers a much larger area than the others (e.g. LRM over Dalarna only).
+    west  = max(b[0] for b in all_bounds)
+    south = max(b[1] for b in all_bounds)
+    east  = min(b[2] for b in all_bounds)
+    north = min(b[3] for b in all_bounds)
+    print(f"\n  Intersect: {west:.3f}°E {south:.3f}°N – {east:.3f}°E {north:.3f}°N")
 
     workers = os.cpu_count() or 4
     print(f"  Workers : {workers}\n")
