@@ -20,9 +20,10 @@ Usage:
 """
 
 import argparse
+import itertools
 import math
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 
 import numpy as np
@@ -108,8 +109,8 @@ def main() -> None:
                     help='Inner block size in pixels (default: 4096)')
     ap.add_argument('--overlap', type=int,   default=256,
                     help='Overlap border in pixels; must be > 3×sigma (default: 256)')
-    ap.add_argument('--workers', type=int,   default=os.cpu_count(),
-                    help='Parallel workers (default: all cores)')
+    ap.add_argument('--workers', type=int,   default=min(8, os.cpu_count()),
+                    help='Parallel workers (default: min(8, cpu_count))')
     args = ap.parse_args()
 
     if args.overlap < 3 * args.sigma:
@@ -149,16 +150,26 @@ def main() -> None:
         for bc in range(n_bc)
     ]
 
+    # Submit at most workers*2 tasks at a time so completed result arrays
+    # (16 MB each) don't accumulate in memory while disk I/O catches up.
+    max_in_flight = args.workers * 2
     done = 0
     with rasterio.open(args.output, 'w', **profile) as dst:
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            futures = {pool.submit(_process_block, a): a for a in block_args}
-            for future in as_completed(futures):
-                window, u8 = future.result()
-                dst.write(u8[np.newaxis], window=window)
-                done += 1
-                print(f"  {done:,}/{total:,}  ({done/total*100:.1f}%)",
-                      end='\r', flush=True)
+            it = iter(block_args)
+            pending = {pool.submit(_process_block, a)
+                       for a in itertools.islice(it, max_in_flight)}
+            while pending:
+                finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    window, u8 = future.result()
+                    dst.write(u8[np.newaxis], window=window)
+                    done += 1
+                    print(f"  {done:,}/{total:,}  ({done/total*100:.1f}%)",
+                          end='\r', flush=True)
+                    next_a = next(it, None)
+                    if next_a is not None:
+                        pending.add(pool.submit(_process_block, next_a))
 
     size_gb = Path(args.output).stat().st_size / 1e9
     print(f"\nDone: {args.output}  ({size_gb:.2f} GB compressed)")

@@ -58,12 +58,14 @@ BBOX="342500 6630000 600000 6900000"
 SKIP_OSM=false
 SKIP_LRM=false
 SKIP_OVERLAY=false
+MAX_ZOOM=14
 
 for arg in "$@"; do
   case $arg in
     --skip-osm)     SKIP_OSM=true ;;
     --skip-lrm)     SKIP_LRM=true ;;
     --skip-overlay) SKIP_OVERLAY=true ;;
+    --max-zoom=*)   MAX_ZOOM="${arg#--max-zoom=}" ;;
   esac
 done
 
@@ -160,7 +162,7 @@ if [ "$SKIP_OVERLAY" = false ]; then
   [ -n "$CHM_VRT"  ] && [ -f "$CHM_VRT"  ] && OVERLAY_ARGS+=(--chm "$CHM_VRT")
   [ -n "$WETNESS"  ] && [ -f "$WETNESS"  ] && OVERLAY_ARGS+=(--wetness "$WETNESS")
 
-  python "$LIDAR_DIR/generate_overlay_tiles.py" "${OVERLAY_ARGS[@]}"
+  python "$LIDAR_DIR/generate_overlay_tiles.py" "${OVERLAY_ARGS[@]}" --zoom 12 "$MAX_ZOOM"
 
   echo ""
   echo "========================================"

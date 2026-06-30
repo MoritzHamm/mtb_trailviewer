@@ -169,7 +169,6 @@ def _tile_worker(args: tuple) -> bool:
 
     rgba = np.stack([ch('lrm'), ch('svf'), ch('chm'), ch('wetness')], axis=-1)
 
-    tile_path = Path(out_dir) / str(z) / str(tx) / f"{ty}.png"
     tile_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(rgba, 'RGBA').save(tile_path, compress_level=1)
     return True
@@ -206,24 +205,36 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
     print(f"  Workers : {workers}\n")
 
     total_written = 0
+    total_skipped = 0
     for z in range(zoom_min, zoom_max + 1):
-        tile_list = [
-            (paths, tx, ty, z, str(out_dir))
-            for tx, ty in tiles_for_bounds(west, south, east, north, z)
-        ]
+        all_tiles = list(tiles_for_bounds(west, south, east, north, z))
+
+        existing = [(tx, ty) for tx, ty in all_tiles
+                    if (out_dir / str(z) / str(tx) / f"{ty}.png").exists()]
+        todo = [(paths, tx, ty, z, str(out_dir)) for tx, ty in all_tiles
+                if (tx, ty) not in set(existing)]
+
+        print(f"Z{z:02d}  {len(all_tiles)} candidates  "
+              f"{len(existing)} existing  {len(todo)} to generate")
+
+        total_skipped += len(existing)
+
+        if not todo:
+            continue
+
         written = 0
-        print(f"Z{z:02d}  {len(tile_list)} candidate tiles", end='', flush=True)
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            for i, result in enumerate(pool.map(_tile_worker, tile_list, chunksize=8)):
+            for i, result in enumerate(pool.map(_tile_worker, todo, chunksize=8)):
                 if result:
                     written += 1
                 if (i + 1) % 200 == 0:
-                    print(f"\n      {i+1}/{len(tile_list)} ({written} written)",
-                          end='', flush=True)
-        print(f"\n      → {written} tiles written")
+                    print(f"      {i+1}/{len(todo)} dispatched  {written} written",
+                          flush=True)
+        print(f"      → {written} tiles written")
         total_written += written
 
-    print(f"\nDone. {total_written} tiles in {out_dir}/")
+    print(f"\nDone. {total_written} new + {total_skipped} existing = "
+          f"{total_written + total_skipped} tiles in {out_dir}/")
     print("\nNext: pack into PMTiles with")
     print(f"  python pack_tiles.py {out_dir} overlay.pmtiles")
 
