@@ -146,18 +146,30 @@ def _tile_worker(args: tuple) -> bool:
 
 
 def generate_tiles(dtm_path: str | Path, out_dir: Path,
-                   zoom_min: int = 12, zoom_max: int = 15) -> None:
+                   zoom_min: int = 12, zoom_max: int = 15,
+                   bbox_3006: tuple[float, float, float, float] | None = None) -> None:
     dtm_path = str(dtm_path)
     out_dir  = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(dtm_path) as src:
         bounds_wgs84 = transform_bounds(src.crs, WGS84, *src.bounds)
-        west, south, east, north = bounds_wgs84
         print(f"Source CRS   : {src.crs}")
-        print(f"Bounds WGS84 : {west:.4f}°E  {south:.4f}°N  {east:.4f}°E  {north:.4f}°N")
         print(f"Nodata       : {src.nodata}")
-        print()
+
+    if bbox_3006 is not None:
+        bbox_wgs84 = transform_bounds(CRS.from_epsg(3006), WGS84, *bbox_3006)
+        bounds_wgs84 = (
+            max(bounds_wgs84[0], bbox_wgs84[0]),
+            max(bounds_wgs84[1], bbox_wgs84[1]),
+            min(bounds_wgs84[2], bbox_wgs84[2]),
+            min(bounds_wgs84[3], bbox_wgs84[3]),
+        )
+        print(f"bbox         : EPSG:3006 {bbox_3006}")
+
+    west, south, east, north = bounds_wgs84
+    print(f"Bounds WGS84 : {west:.4f}°E  {south:.4f}°N  {east:.4f}°E  {north:.4f}°N")
+    print()
 
     # os.cpu_count() workers each hold their own GDAL handle/cache against the
     # source DTM; on a 24-thread machine that can exceed available RAM and
@@ -242,6 +254,11 @@ if __name__ == "__main__":
     parser.add_argument("--zoom",  nargs=2, type=int, default=[12, 15],
                         metavar=("MIN", "MAX"),
                         help="Zoom range (default: 12 15)")
+    parser.add_argument("--bbox", nargs=4, type=float, default=None,
+                        metavar=("MINX", "MINY", "MAXX", "MAXY"),
+                        help="Bounding box in SWEREF99TM / EPSG:3006 to further "
+                             "restrict output extent (e.g. for a small test region)")
     args = parser.parse_args()
 
-    generate_tiles(args.dtm, Path(args.out_dir), *args.zoom)
+    bbox_3006 = tuple(args.bbox) if args.bbox else None
+    generate_tiles(args.dtm, Path(args.out_dir), *args.zoom, bbox_3006=bbox_3006)

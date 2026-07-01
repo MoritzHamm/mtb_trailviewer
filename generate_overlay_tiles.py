@@ -241,7 +241,8 @@ def _scan_existing(out_dir: Path, z: int) -> set:
 
 def generate_overlay_tiles(paths: dict, out_dir: Path,
                             zoom_min: int, zoom_max: int,
-                            workers: int | None = None) -> None:
+                            workers: int | None = None,
+                            bbox_3006: tuple[float, float, float, float] | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     all_bounds = []
@@ -255,6 +256,10 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
 
     if not all_bounds:
         raise RuntimeError("No input files provided.")
+
+    if bbox_3006 is not None:
+        all_bounds.append(transform_bounds(CRS.from_epsg(3006), WGS84, *bbox_3006))
+        print(f"  bbox    : EPSG:3006 {bbox_3006}")
 
     west  = max(b[0] for b in all_bounds)
     south = max(b[1] for b in all_bounds)
@@ -346,6 +351,10 @@ def main() -> None:
     ap.add_argument('--workers', type=int, default=None,
                     help='Parallel worker processes (default: min(cpu_count, 8) '
                          'to avoid OOM on wide low-zoom strips)')
+    ap.add_argument('--bbox', nargs=4, type=float, default=None,
+                    metavar=('MINX', 'MINY', 'MAXX', 'MAXY'),
+                    help='Bounding box in SWEREF99TM / EPSG:3006 to further '
+                         'restrict output extent (e.g. for a small test region)')
     args = ap.parse_args()
 
     paths = {
@@ -358,7 +367,9 @@ def main() -> None:
         ap.error("Provide at least one of --chm, --wetness")
 
     print("Overlay tile inputs:")
-    generate_overlay_tiles(paths, Path(args.out), *args.zoom, workers=args.workers)
+    bbox_3006 = tuple(args.bbox) if args.bbox else None
+    generate_overlay_tiles(paths, Path(args.out), *args.zoom,
+                            workers=args.workers, bbox_3006=bbox_3006)
 
 
 if __name__ == '__main__':

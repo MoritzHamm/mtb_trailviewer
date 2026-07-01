@@ -158,7 +158,7 @@ if [ "$SKIP_OVERLAY" = false ]; then
   echo "Step 3: Generating RGBA overlay tiles"
   echo "========================================"
 
-  OVERLAY_ARGS=(--out "$OVERLAY_TILES")
+  OVERLAY_ARGS=(--out "$OVERLAY_TILES" --bbox $BBOX)
   [ -n "$CHM_VRT"  ] && [ -f "$CHM_VRT"  ] && OVERLAY_ARGS+=(--chm "$CHM_VRT")
   [ -n "$WETNESS"  ] && [ -f "$WETNESS"  ] && OVERLAY_ARGS+=(--wetness "$WETNESS")
 
@@ -186,7 +186,7 @@ if [ "$SKIP_TERRAIN" = false ]; then
     exit 1
   fi
   python "$LIDAR_DIR/generate_elevation_tiles.py" \
-    "$DTM_VRT" "$TERRAIN_TILES" --zoom 12 "$MAX_ZOOM"
+    "$DTM_VRT" "$TERRAIN_TILES" --zoom 12 "$MAX_ZOOM" --bbox $BBOX
 
   echo ""
   echo "========================================"
