@@ -37,10 +37,11 @@ from rasterio.warp import reproject, Resampling, transform_bounds
 from rasterio.transform import Affine
 from scipy.ndimage import distance_transform_edt
 
-TILE_SIZE  = 256
-HALF_WORLD = 20037508.3427892
-WEB_MERC   = CRS.from_epsg(3857)
-WGS84      = CRS.from_epsg(4326)
+TILE_SIZE       = 256
+HALF_WORLD      = 20037508.3427892
+WEB_MERC        = CRS.from_epsg(3857)
+WGS84           = CRS.from_epsg(4326)
+MAX_STRIP_TILES = 64   # max tile-columns per strip; limits RAM to ~50 MB/strip at Z17
 
 NEUTRAL = {'lrm': 128, 'svf': 0, 'chm': 0, 'wetness': 0}
 
@@ -342,10 +343,13 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
         if not rows:
             continue
 
-        strip_args = [
-            (cached_paths, ty, sorted(txs), z, str(out_dir))
-            for ty, txs in sorted(rows.items())
-        ]
+        strip_args = []
+        for ty, txs in sorted(rows.items()):
+            txs_sorted = sorted(txs)
+            for i in range(0, len(txs_sorted), MAX_STRIP_TILES):
+                strip_args.append(
+                    (cached_paths, ty, txs_sorted[i:i + MAX_STRIP_TILES], z, str(out_dir))
+                )
 
         written = 0
         strips_done = 0

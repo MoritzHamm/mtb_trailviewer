@@ -72,8 +72,6 @@ class OSMHandler(osmium.SimpleHandler):
         self.minlat, self.maxlat = minlat, maxlat
         self.minlon, self.maxlon = minlon, maxlon
 
-        self._nodes: dict[int, tuple[float, float]] = {}   # for way assembly
-
         self.roads          : list[dict] = []
         self.tracks         : list[dict] = []
         self.paths          : list[dict] = []
@@ -93,9 +91,6 @@ class OSMHandler(osmium.SimpleHandler):
         if not loc.valid():
             return
         lon, lat = loc.lon, loc.lat
-
-        if self._in_bbox(lon, lat):
-            self._nodes[n.id] = (lon, lat)
 
         if not (self.minlat <= lat <= self.maxlat and self.minlon <= lon <= self.maxlon):
             return
@@ -126,10 +121,8 @@ class OSMHandler(osmium.SimpleHandler):
         if not any([hw, ww, rw, pwr == "line", nat in NATURAL_LINE_TYPES]):
             return
 
-        try:
-            coords = [self._nodes[nd.ref] for nd in w.nodes if nd.ref in self._nodes]
-        except Exception:
-            return
+        coords = [(nd.location.lon, nd.location.lat)
+                  for nd in w.nodes if nd.location.valid()]
         if len(coords) < 2:
             return
 

@@ -253,7 +253,7 @@ const map = new maplibregl.Map({
         tileSize: 256,
         encoding: 'mapbox',
         minzoom: 8,
-        maxzoom: 15,
+        maxzoom: 17,
         attribution: '© Lantmäteriet LiDAR',
       },
       coverage: {
@@ -615,15 +615,25 @@ document.addEventListener('touchend', () => { dragging = false; });
 // ---------------------------------------------------------------------------
 const status = document.getElementById('status');
 
+function zoomStatus() {
+  const z = map.getZoom();
+  const terrainZ = Math.min(Math.floor(z), 17);
+  return `Z${z.toFixed(1)}  (terrain tile Z${terrainZ})`;
+}
+
 map.on('mousemove', e => {
   const { lng, lat } = e.lngLat;
   const elev = map.queryTerrainElevation(e.lngLat, { exaggerated: false });
   const elevStr = elev !== null ? ` · ${Math.round(elev)} m` : '';
-  status.textContent = `${lat.toFixed(5)}°N  ${lng.toFixed(5)}°E${elevStr}`;
+  status.textContent = `${zoomStatus()}  ·  ${lat.toFixed(5)}°N  ${lng.toFixed(5)}°E${elevStr}`;
+});
+
+map.on('zoom', () => {
+  status.textContent = zoomStatus();
 });
 
 map.on('mouseleave', () => {
-  status.textContent = 'Move mouse over the map';
+  status.textContent = zoomStatus();
 });
 
 // ---------------------------------------------------------------------------

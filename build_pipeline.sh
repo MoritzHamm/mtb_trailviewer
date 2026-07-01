@@ -44,18 +44,28 @@ MAX_ZOOM=17
 BBOX="342500 6630000 600000 6900000"   # full Dalarna
 WORK="$HOME/lidar-output"
 LRM_OVERRIDE=""   # override LRM path (useful with --skip-lrm and --work=)
+DTM_OVERRIDE=""   # override DTM source (single tile instead of merged VRT)
+CHM_OVERRIDE=""   # override CHM source
+WETNESS_OVERRIDE="" # override wetness source
 
 for arg in "$@"; do
   case $arg in
-    --skip-osm)     SKIP_OSM=true ;;
-    --skip-lrm)     SKIP_LRM=true ;;
-    --skip-overlay) SKIP_OVERLAY=true ;;
-    --max-zoom=*)   MAX_ZOOM="${arg#--max-zoom=}" ;;
-    --bbox=*)       BBOX="${arg#--bbox=}" ;;
-    --work=*)       WORK="${arg#--work=}" ;;
-    --lrm=*)        LRM_OVERRIDE="${arg#--lrm=}" ;;
+    --skip-osm)      SKIP_OSM=true ;;
+    --skip-lrm)      SKIP_LRM=true ;;
+    --skip-overlay)  SKIP_OVERLAY=true ;;
+    --max-zoom=*)    MAX_ZOOM="${arg#--max-zoom=}" ;;
+    --bbox=*)        BBOX="${arg#--bbox=}" ;;
+    --work=*)        WORK="${arg#--work=}" ;;
+    --lrm=*)         LRM_OVERRIDE="${arg#--lrm=}" ;;
+    --dtm=*)         DTM_OVERRIDE="${arg#--dtm=}" ;;
+    --chm=*)         CHM_OVERRIDE="${arg#--chm=}" ;;
+    --wetness=*)     WETNESS_OVERRIDE="${arg#--wetness=}" ;;
   esac
 done
+
+[ -n "$DTM_OVERRIDE"     ] && DTM_VRT="$DTM_OVERRIDE"
+[ -n "$CHM_OVERRIDE"     ] && CHM_VRT="$CHM_OVERRIDE"
+[ -n "$WETNESS_OVERRIDE" ] && WETNESS="$WETNESS_OVERRIDE"
 
 # -----------------------------------------------------------------------------
 # All outputs go here (overridable with --work=)
