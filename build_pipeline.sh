@@ -12,17 +12,17 @@
 # The viewer/tiles directory is populated at the end.
 #
 # Steps:
-#   1. OSM extraction       → $WORK/osm_layers/
-#   2. Vector PMTiles       → $WORK/dalarna.pmtiles
-#   3. LRM from DTM         → $WORK/dalarna_lrm.tif
-#   4. RGBA overlay tiles   → $WORK/overlay-tiles/
-#   5. Overlay PMTiles      → $WORK/overlay.pmtiles
+#   1. OSM extraction        → $WORK/osm_layers/
+#   2. Vector PMTiles        → $WORK/dalarna.pmtiles
+#   3. RGBA overlay tiles    → $WORK/overlay-tiles/
+#   4. Overlay PMTiles       → $WORK/overlay.pmtiles
+#   5. Terrain RGB tiles     → $WORK/terrain-tiles/  → $WORK/terrain.pmtiles
 #   6. Copy tiles to viewer
 #
 # Usage:
-#   bash build_pipeline.sh [--skip-osm] [--skip-lrm] [--skip-overlay]
-#   bash build_pipeline.sh --skip-osm              # overlay only
-#   bash build_pipeline.sh --skip-lrm --skip-overlay  # OSM/vectors only
+#   bash build_pipeline.sh [--skip-osm] [--skip-overlay] [--skip-terrain]
+#   bash build_pipeline.sh --skip-osm                      # overlay + terrain only
+#   bash build_pipeline.sh --skip-terrain --skip-overlay   # OSM/vectors only
 # =============================================================================
 set -euo pipefail
 
@@ -38,12 +38,11 @@ OSM_PBF="/home/mo/lidar/osm/sweden-latest.osm.pbf"
 # Flags (parsed before paths so --work= and --bbox= take effect)
 # -----------------------------------------------------------------------------
 SKIP_OSM=false
-SKIP_LRM=false
 SKIP_OVERLAY=false
+SKIP_TERRAIN=false
 MAX_ZOOM=17
 BBOX="342500 6630000 600000 6900000"   # full Dalarna
 WORK="$HOME/lidar-output"
-LRM_OVERRIDE=""   # override LRM path (useful with --skip-lrm and --work=)
 DTM_OVERRIDE=""   # override DTM source (single tile instead of merged VRT)
 CHM_OVERRIDE=""   # override CHM source
 WETNESS_OVERRIDE="" # override wetness source
@@ -51,12 +50,11 @@ WETNESS_OVERRIDE="" # override wetness source
 for arg in "$@"; do
   case $arg in
     --skip-osm)      SKIP_OSM=true ;;
-    --skip-lrm)      SKIP_LRM=true ;;
     --skip-overlay)  SKIP_OVERLAY=true ;;
+    --skip-terrain)  SKIP_TERRAIN=true ;;
     --max-zoom=*)    MAX_ZOOM="${arg#--max-zoom=}" ;;
     --bbox=*)        BBOX="${arg#--bbox=}" ;;
     --work=*)        WORK="${arg#--work=}" ;;
-    --lrm=*)         LRM_OVERRIDE="${arg#--lrm=}" ;;
     --dtm=*)         DTM_OVERRIDE="${arg#--dtm=}" ;;
     --chm=*)         CHM_OVERRIDE="${arg#--chm=}" ;;
     --wetness=*)     WETNESS_OVERRIDE="${arg#--wetness=}" ;;
@@ -72,11 +70,12 @@ done
 # -----------------------------------------------------------------------------
 mkdir -p "$WORK"
 
-LRM="${LRM_OVERRIDE:-$WORK/lrm.tif}"
 OSM_LAYERS="$WORK/osm_layers"
 VEC_PMTILES="$WORK/dalarna.pmtiles"
 OVERLAY_TILES="$WORK/overlay-tiles"
 OVERLAY_PMTILES="$WORK/overlay.pmtiles"
+TERRAIN_TILES="$WORK/terrain-tiles"
+TERRAIN_PMTILES="$WORK/terrain.pmtiles"
 
 LIDAR_DIR="$(cd "$(dirname "$0")" && pwd)"
 VIEWER="$LIDAR_DIR/viewer/tiles"
@@ -151,37 +150,15 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 3: LRM
-# -----------------------------------------------------------------------------
-if [ "$SKIP_LRM" = false ]; then
-  echo ""
-  echo "========================================"
-  echo "Step 3: Computing LRM from DTM"
-  echo "========================================"
-  if [ ! -f "$DTM_VRT" ]; then
-    echo "ERROR: DTM not found at $DTM_VRT"
-    exit 1
-  fi
-  python "$LIDAR_DIR/compute_lrm.py" "$DTM_VRT" "$LRM"
-else
-  echo "Skipping LRM (--skip-lrm)"
-fi
-
-# -----------------------------------------------------------------------------
-# Step 4 + 5: Overlay tiles
+# Step 3 + 4: Overlay tiles
 # -----------------------------------------------------------------------------
 if [ "$SKIP_OVERLAY" = false ]; then
   echo ""
   echo "========================================"
-  echo "Step 4: Generating RGBA overlay tiles"
+  echo "Step 3: Generating RGBA overlay tiles"
   echo "========================================"
 
-  if [ ! -f "$LRM" ]; then
-    echo "ERROR: LRM not found at $LRM — run without --skip-lrm first"
-    exit 1
-  fi
-
-  OVERLAY_ARGS=(--lrm "$LRM" --out "$OVERLAY_TILES")
+  OVERLAY_ARGS=(--out "$OVERLAY_TILES")
   [ -n "$CHM_VRT"  ] && [ -f "$CHM_VRT"  ] && OVERLAY_ARGS+=(--chm "$CHM_VRT")
   [ -n "$WETNESS"  ] && [ -f "$WETNESS"  ] && OVERLAY_ARGS+=(--wetness "$WETNESS")
 
@@ -189,11 +166,36 @@ if [ "$SKIP_OVERLAY" = false ]; then
 
   echo ""
   echo "========================================"
-  echo "Step 5: Packing overlay tiles → PMTiles"
+  echo "Step 4: Packing overlay tiles → PMTiles"
   echo "========================================"
   python "$LIDAR_DIR/pack_tiles.py" "$OVERLAY_TILES" "$OVERLAY_PMTILES" --name overlay
 else
   echo "Skipping overlay tiles (--skip-overlay)"
+fi
+
+# -----------------------------------------------------------------------------
+# Step 5: Terrain RGB tiles
+# -----------------------------------------------------------------------------
+if [ "$SKIP_TERRAIN" = false ]; then
+  echo ""
+  echo "========================================"
+  echo "Step 5: Generating terrain RGB tiles"
+  echo "========================================"
+  if [ ! -f "$DTM_VRT" ]; then
+    echo "ERROR: DTM not found at $DTM_VRT"
+    exit 1
+  fi
+  python "$LIDAR_DIR/generate_elevation_tiles.py" \
+    "$DTM_VRT" "$TERRAIN_TILES" --zoom 12 "$MAX_ZOOM"
+
+  echo ""
+  echo "========================================"
+  echo "Step 5b: Packing terrain tiles → PMTiles"
+  echo "========================================"
+  python "$LIDAR_DIR/pack_tiles.py" \
+    "$TERRAIN_TILES" "$TERRAIN_PMTILES" --name terrain
+else
+  echo "Skipping terrain tiles (--skip-terrain)"
 fi
 
 # -----------------------------------------------------------------------------
@@ -211,6 +213,7 @@ copy_if_exists() {
 
 copy_if_exists "$VEC_PMTILES"     "$VIEWER/dalarna.pmtiles"
 copy_if_exists "$OVERLAY_PMTILES" "$VIEWER/overlay.pmtiles"
+copy_if_exists "$TERRAIN_PMTILES" "$VIEWER/terrain.pmtiles"
 
 echo ""
 echo "Pipeline complete."

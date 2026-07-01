@@ -159,7 +159,10 @@ def generate_tiles(dtm_path: str | Path, out_dir: Path,
         print(f"Nodata       : {src.nodata}")
         print()
 
-    workers = os.cpu_count() or 4
+    # os.cpu_count() workers each hold their own GDAL handle/cache against the
+    # source DTM; on a 24-thread machine that can exceed available RAM and
+    # trigger the OOM killer (see generate_overlay_tiles.py for the same fix).
+    workers = min(os.cpu_count() or 4, 8)
     print(f"Using {workers} parallel workers\n")
 
     total_written = 0

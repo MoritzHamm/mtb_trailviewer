@@ -2,9 +2,9 @@
 """
 Generate RGBA overlay tile pyramid from analysis-layer GeoTIFFs.
 
-Packs four 8-bit analysis layers into a single RGBA PNG tile set:
+Packs 8-bit analysis layers into a single RGBA PNG tile set:
 
-  R = LRM      128=flat, <128=depression, >128=raised
+  R = reserved (unused; LRM removed for now, pending a dedicated test setup)
   G = SVF      255=open sky, 0=enclosed  (placeholder 0 until SVF is computed)
   B = CHM      0=bare ground, 255=35 m canopy
   A = Wetness  0=dry (SLU 0), 255=wet (SLU 100)
@@ -14,7 +14,6 @@ Output tiles go to out_dir/{z}/{x}/{y}.png and are suitable for pack_tiles.py.
 
 Usage:
     python generate_overlay_tiles.py \\
-        --lrm     /mnt/g/lidar-output/lovberget_lrm.tif \\
         --chm     /mnt/g/lidar-output/lovberget_chm.tif \\
         --wetness /mnt/g/lidar-output/lovberget_wetness.tif \\
         --out     viewer/overlay-tiles \\
@@ -43,7 +42,7 @@ WEB_MERC        = CRS.from_epsg(3857)
 WGS84           = CRS.from_epsg(4326)
 MAX_STRIP_TILES = 64   # max tile-columns per strip; limits RAM to ~50 MB/strip at Z17
 
-NEUTRAL = {'lrm': 128, 'svf': 0, 'chm': 0, 'wetness': 0}
+NEUTRAL = {'svf': 0, 'chm': 0, 'wetness': 0}
 
 
 # ---------------------------------------------------------------------------
@@ -153,44 +152,6 @@ def _read_strip(src_path: str, strip_transform: Affine, strip_w: int,
     return dst
 
 
-def _read_lrm_strip(src_path: str, strip_transform: Affine,
-                    strip_w: int, z: int) -> np.ndarray | None:
-    """
-    LRM strip with max-magnitude aggregation at low zoom.
-    At Z15+ bilinear is used (near-native resolution, averaging is fine).
-    Below Z15 we take two passes — max and min — then keep whichever pixel
-    deviates most from 128, preserving trail features that bilinear would erase.
-    """
-    FLAT = 128.0
-
-    def _pass(resampling):
-        dst = np.full((TILE_SIZE, strip_w), FLAT, dtype=np.float32)
-        with rasterio.open(src_path) as src:
-            reproject(
-                source=rasterio.band(src, 1), destination=dst,
-                src_transform=src.transform, src_crs=src.crs,
-                dst_transform=strip_transform, dst_crs=WEB_MERC,
-                resampling=resampling,
-                src_nodata=src.nodata, dst_nodata=FLAT,
-            )
-        return dst
-
-    if z >= 15:
-        dst = _pass(Resampling.bilinear)
-    else:
-        hi = _pass(Resampling.max)
-        lo = _pass(Resampling.min)
-        dst = np.where(hi - FLAT >= FLAT - lo, hi, lo)
-
-    if not np.any(dst != FLAT):
-        return None
-    mask = ~np.isfinite(dst)
-    if mask.any():
-        dst = fill_nodata(dst, mask)
-        dst[mask] = FLAT
-    return dst
-
-
 # ---------------------------------------------------------------------------
 # Strip worker — called once per tile-row, processes all tiles in that row
 # ---------------------------------------------------------------------------
@@ -221,11 +182,9 @@ def _strip_worker(args: tuple) -> int:
     strip_tf      = Affine(pixel_m, 0, west, 0, -pixel_m, north)
 
     # Read each channel once for the whole strip
-    lrm_s = _read_lrm_strip(paths['lrm'],     strip_tf, strip_w, z) if paths.get('lrm')     else None
-    chm_s = _read_strip(    paths['chm'],     strip_tf, strip_w, 0.0) if paths.get('chm')     else None
-    wet_s = _read_strip(    paths['wetness'], strip_tf, strip_w, 0.0) if paths.get('wetness') else None
+    chm_s = _read_strip(paths['chm'],     strip_tf, strip_w, 0.0) if paths.get('chm')     else None
+    wet_s = _read_strip(paths['wetness'], strip_tf, strip_w, 0.0) if paths.get('wetness') else None
 
-    def to_uint8_lrm(a): return np.clip(np.round(a), 0, 255).astype(np.uint8)
     def to_uint8_chm(a): return np.clip(np.round(a / 35.0 * 255), 0, 255).astype(np.uint8)
     def to_uint8_wet(a): return np.clip(np.round(a * 2.55), 0, 255).astype(np.uint8)
 
@@ -235,7 +194,6 @@ def _strip_worker(args: tuple) -> int:
         c1 = c0 + TILE_SIZE
 
         channels = {
-            'lrm':     to_uint8_lrm(lrm_s[:, c0:c1]) if lrm_s is not None else None,
             'chm':     to_uint8_chm(chm_s[:, c0:c1]) if chm_s is not None else None,
             'wetness': to_uint8_wet(wet_s[:, c0:c1]) if wet_s is not None else None,
         }
@@ -254,7 +212,8 @@ def _strip_worker(args: tuple) -> int:
             return v if v is not None else np.full((TILE_SIZE, TILE_SIZE),
                                                     NEUTRAL[key], dtype=np.uint8)
 
-        rgba = np.stack([ch('lrm'), ch('svf'), ch('chm'), ch('wetness')], axis=-1)
+        r_reserved = np.zeros((TILE_SIZE, TILE_SIZE), dtype=np.uint8)
+        rgba = np.stack([r_reserved, ch('svf'), ch('chm'), ch('wetness')], axis=-1)
         tile_path.parent.mkdir(parents=True, exist_ok=True)
         Image.fromarray(rgba, 'RGBA').save(tile_path, compress_level=1)
         written += 1
@@ -281,7 +240,8 @@ def _scan_existing(out_dir: Path, z: int) -> set:
 
 
 def generate_overlay_tiles(paths: dict, out_dir: Path,
-                            zoom_min: int, zoom_max: int) -> None:
+                            zoom_min: int, zoom_max: int,
+                            workers: int | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     all_bounds = []
@@ -318,7 +278,11 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
             cached_paths[key] = p
     cached_paths['svf'] = None  # placeholder
 
-    workers = os.cpu_count() or 4
+    # Each worker holds a full source-strip in memory plus GDAL's own block
+    # cache; os.cpu_count() workers (e.g. 24) can exceed available RAM and
+    # trigger the OOM killer. Default to a conservative cap unless overridden.
+    if workers is None:
+        workers = min(os.cpu_count() or 4, 8)
     print(f"\n  Workers : {workers}\n")
 
     total_written = 0
@@ -373,27 +337,28 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--lrm',     help='LRM GeoTIFF  (uint8, 128=flat)  → R channel')
     ap.add_argument('--chm',     help='CHM GeoTIFF  (float32, metres)  → B channel')
     ap.add_argument('--wetness', help='Wetness GeoTIFF (float32, 0–100) → A channel')
     ap.add_argument('--out',     default='viewer/overlay-tiles',
                     help='Output tile directory (default: viewer/overlay-tiles)')
     ap.add_argument('--zoom',    nargs=2, type=int, default=[12, 17],
                     metavar=('MIN', 'MAX'), help='Zoom range (default: 12 17)')
+    ap.add_argument('--workers', type=int, default=None,
+                    help='Parallel worker processes (default: min(cpu_count, 8) '
+                         'to avoid OOM on wide low-zoom strips)')
     args = ap.parse_args()
 
     paths = {
-        'lrm':     args.lrm,
         'svf':     None,
         'chm':     args.chm,
         'wetness': args.wetness,
     }
 
     if not any(paths.values()):
-        ap.error("Provide at least one of --lrm, --chm, --wetness")
+        ap.error("Provide at least one of --chm, --wetness")
 
     print("Overlay tile inputs:")
-    generate_overlay_tiles(paths, Path(args.out), *args.zoom)
+    generate_overlay_tiles(paths, Path(args.out), *args.zoom, workers=args.workers)
 
 
 if __name__ == '__main__':
