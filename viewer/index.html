@@ -54,6 +54,7 @@
     <option value="osm">OpenStreetMap</option>
     <option value="satellite">Satellite (Esri)</option>
     <option value="slope">Slope colors</option>
+    <option value="lrm">LRM / Trail detect</option>
     <option value="none">None</option>
   </select>
 
@@ -90,7 +91,8 @@ const pmtilesProtocol = new pmtiles.Protocol();
 maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile.bind(pmtilesProtocol));
 
 // Shared PMTiles instance for terrain — reused by the slope protocol below
-const terrainTiles = new pmtiles.PMTiles(`${TILE_BASE}/terrain.pmtiles`);
+const terrainTiles  = new pmtiles.PMTiles(`${TILE_BASE}/terrain.pmtiles`);
+const overlayTiles  = new pmtiles.PMTiles(`${TILE_BASE}/overlay.pmtiles`);
 
 // ---------------------------------------------------------------------------
 // Slope overlay protocol — computes slope from terrain-RGB tiles in the browser
@@ -150,6 +152,77 @@ maplibregl.addProtocol('slope', async (params) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// LRM / trail-detect protocol — decodes overlay.pmtiles RGBA:
+//   R = LRM (128=flat, <128=depression, >128=raised)
+//   B = CHM (canopy height, 0–255 → 0–35 m)
+//   A = Wetness (0=dry, 255=wet)
+// Depression=blue, raised=orange; wetness adds blue tint; canopy darkens
+// ---------------------------------------------------------------------------
+maplibregl.addProtocol('lrm', async (params) => {
+  try {
+    const [z, x, y] = params.url.replace('lrm://', '').split('/').map(Number);
+    const tile = await overlayTiles.getZxy(z, x, y);
+    if (!tile) throw new Error('not found');
+    const srcBitmap = await createImageBitmap(new Blob([tile.data]));
+
+    const S = 256;
+    const srcCtx = new OffscreenCanvas(S, S).getContext('2d');
+    srcCtx.drawImage(srcBitmap, 0, 0);
+    const { data: src } = srcCtx.getImageData(0, 0, S, S);
+
+    const out = new ImageData(S, S);
+    const dst = out.data;
+
+    for (let p = 0; p < S * S; p++) {
+      const lrm     = src[p * 4];        // R: LRM  128=flat
+      const chm     = src[p * 4 + 2];    // B: canopy height 0–255
+      const wetness = src[p * 4 + 3];    // A: soil wetness 0–255
+
+      // Diverging colormap centred at 128: depression→blue, raised→orange
+      const t = (lrm - 128) / 128;             // −1..+1
+      const s = Math.min(Math.abs(t) * 4, 1);  // amplified magnitude 0..1
+      let R, G, B, A;
+      if (t <= 0) {
+        R = Math.round(220 * (1 - s));
+        G = Math.round(220 * (1 - s * 0.6));
+        B = 255;
+      } else {
+        R = 255;
+        G = Math.round(200 * (1 - s * 0.8));
+        B = Math.round(180 * (1 - s));
+      }
+      A = Math.round(40 + s * 200);  // flat areas nearly transparent
+
+      // Wet soil → stronger blue tint
+      const wt = wetness / 255;
+      if (wt > 0.25) {
+        const wb = (wt - 0.25) / 0.75;
+        B = Math.min(255, Math.round(B + wb * 60));
+        A = Math.min(255, Math.round(A + wb * 40));
+      }
+
+      // Dense canopy → darken slightly
+      const ct = chm / 255;
+      R = Math.round(R * (1 - ct * 0.35));
+      G = Math.round(G * (1 - ct * 0.35));
+      B = Math.round(B * (1 - ct * 0.2));
+
+      dst[p * 4]     = R;
+      dst[p * 4 + 1] = G;
+      dst[p * 4 + 2] = B;
+      dst[p * 4 + 3] = A;
+    }
+
+    const dstCanvas = new OffscreenCanvas(S, S);
+    dstCanvas.getContext('2d').putImageData(out, 0, 0);
+    const blob = await dstCanvas.convertToBlob({ type: 'image/png' });
+    return { data: await blob.arrayBuffer() };
+  } catch (_) {
+    return { data: new ArrayBuffer(0) };
+  }
+});
+
 const CENTER_LNG = 15.625;   // Lövberget / Falun area
 const CENTER_LAT = 60.608;
 const START_ZOOM = 13;
@@ -194,6 +267,13 @@ const map = new maplibregl.Map({
         minzoom: 8,
         maxzoom: 15,
       },
+      'lrm-tiles': {
+        type: 'raster',
+        tiles: ['lrm://{z}/{x}/{y}'],
+        tileSize: 256,
+        minzoom: 12,
+        maxzoom: 17,
+      },
       osmvec: {
         type: 'vector',
         url: `pmtiles://${TILE_BASE}/dalarna.pmtiles`,
@@ -208,6 +288,10 @@ const map = new maplibregl.Map({
       { id: 'slope-overlay', type: 'raster', source: 'slope-tiles',
         layout: { visibility: 'none' },
         paint: { 'raster-opacity': 0.65, 'raster-fade-duration': 0 },
+      },
+      { id: 'lrm-overlay', type: 'raster', source: 'lrm-tiles',
+        layout: { visibility: 'none' },
+        paint: { 'raster-opacity': 1.0, 'raster-fade-duration': 0 },
       },
       { id: 'hillshade', type: 'hillshade', source: 'terrain', paint: {
           'hillshade-illumination-anchor': 'map',
@@ -551,6 +635,7 @@ function applyBackground(chosen) {
   Object.entries(BG_LAYERS).forEach(([key, id]) =>
     map.setLayoutProperty(id, 'visibility', key === chosen ? 'visible' : 'none'));
   map.setLayoutProperty('slope-overlay', 'visibility', chosen === 'slope' ? 'visible' : 'none');
+  map.setLayoutProperty('lrm-overlay',   'visibility', chosen === 'lrm'   ? 'visible' : 'none');
 }
 
 document.getElementById('bg-select').addEventListener('change', e => {

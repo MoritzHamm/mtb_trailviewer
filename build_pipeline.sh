@@ -35,30 +35,15 @@ WETNESS="/mnt/g/SLU/SLUMarkfuktighetskarta/SLUMarkfuktighetskarta.tif"
 OSM_PBF="/home/mo/lidar/osm/sweden-latest.osm.pbf"
 
 # -----------------------------------------------------------------------------
-# All outputs go here
-# -----------------------------------------------------------------------------
-WORK="$HOME/lidar-output"
-mkdir -p "$WORK"
-
-LRM="$WORK/dalarna_lrm.tif"
-OSM_LAYERS="$WORK/osm_layers"
-VEC_PMTILES="$WORK/dalarna.pmtiles"
-OVERLAY_TILES="$WORK/overlay-tiles"
-OVERLAY_PMTILES="$WORK/overlay.pmtiles"
-
-LIDAR_DIR="$(cd "$(dirname "$0")" && pwd)"
-VIEWER="$LIDAR_DIR/viewer/tiles"
-
-# Dalarna LiDAR extent in SWEREF99TM
-BBOX="342500 6630000 600000 6900000"
-
-# -----------------------------------------------------------------------------
-# Flags
+# Flags (parsed before paths so --work= and --bbox= take effect)
 # -----------------------------------------------------------------------------
 SKIP_OSM=false
 SKIP_LRM=false
 SKIP_OVERLAY=false
-MAX_ZOOM=14
+MAX_ZOOM=17
+BBOX="342500 6630000 600000 6900000"   # full Dalarna
+WORK="$HOME/lidar-output"
+LRM_OVERRIDE=""   # override LRM path (useful with --skip-lrm and --work=)
 
 for arg in "$@"; do
   case $arg in
@@ -66,8 +51,25 @@ for arg in "$@"; do
     --skip-lrm)     SKIP_LRM=true ;;
     --skip-overlay) SKIP_OVERLAY=true ;;
     --max-zoom=*)   MAX_ZOOM="${arg#--max-zoom=}" ;;
+    --bbox=*)       BBOX="${arg#--bbox=}" ;;
+    --work=*)       WORK="${arg#--work=}" ;;
+    --lrm=*)        LRM_OVERRIDE="${arg#--lrm=}" ;;
   esac
 done
+
+# -----------------------------------------------------------------------------
+# All outputs go here (overridable with --work=)
+# -----------------------------------------------------------------------------
+mkdir -p "$WORK"
+
+LRM="${LRM_OVERRIDE:-$WORK/lrm.tif}"
+OSM_LAYERS="$WORK/osm_layers"
+VEC_PMTILES="$WORK/dalarna.pmtiles"
+OVERLAY_TILES="$WORK/overlay-tiles"
+OVERLAY_PMTILES="$WORK/overlay.pmtiles"
+
+LIDAR_DIR="$(cd "$(dirname "$0")" && pwd)"
+VIEWER="$LIDAR_DIR/viewer/tiles"
 
 source ~/lidar-env/bin/activate
 
@@ -100,19 +102,30 @@ if [ "$SKIP_OSM" = false ]; then
   echo "Step 2: Building vector PMTiles"
   echo "========================================"
 
-  LAYER_ARGS=()
-  for layer in roads tracks paths waterways railways powerlines natural_lines \
-               water landuse buildings; do
+  # Line layers: never drop features — trails are the whole point
+  LINE_ARGS=()
+  for layer in roads tracks paths waterways railways powerlines natural_lines; do
     f="$OSM_LAYERS/${layer}.geojson"
-    [ -f "$f" ] && LAYER_ARGS+=("-L" "${layer}:${f}") \
+    [ -f "$f" ] && LINE_ARGS+=(
+      "--no-feature-limit" "--no-tile-size-limit" "-L" "${layer}:${f}") \
                 || echo "  Skipping missing layer: $layer"
   done
 
+  # Polygon layers: allow dropping in dense areas (buildings/landuse bloat tiles)
+  POLY_ARGS=()
+  for layer in water landuse buildings; do
+    f="$OSM_LAYERS/${layer}.geojson"
+    [ -f "$f" ] && POLY_ARGS+=("-L" "${layer}:${f}") \
+                || echo "  Skipping missing layer: $layer"
+  done
+
+  # Point layers: never drop
   POINT_ARGS=()
   for layer in peaks places; do
     f="$OSM_LAYERS/${layer}.geojson"
     [ -f "$f" ] && POINT_ARGS+=(
-      "--no-feature-limit" "--no-tile-size-limit" "-L" "${layer}:${f}")
+      "--no-feature-limit" "--no-tile-size-limit" "-L" "${layer}:${f}") \
+                || echo "  Skipping missing layer: $layer"
   done
 
   tippecanoe \
@@ -120,7 +133,7 @@ if [ "$SKIP_OSM" = false ]; then
     --minimum-zoom=6 --maximum-zoom=16 \
     --drop-densest-as-needed --extend-zooms-if-still-dropping \
     --read-parallel \
-    "${LAYER_ARGS[@]}" "${POINT_ARGS[@]}"
+    "${LINE_ARGS[@]}" "${POLY_ARGS[@]}" "${POINT_ARGS[@]}"
 
   echo "Written: $VEC_PMTILES"
 else
