@@ -8,21 +8,30 @@
 #   WETNESS    — SLU Markfuktighetskarta full-Sweden GeoTIFF
 #   OSM_PBF    — sweden-latest.osm.pbf
 #
-# All intermediate and output files go to WORK (~/lidar-output).
+# Intermediate/output files are split across two work dirs:
+#   WORK_FAST (~/lidar-output)       — raw z/x/y.png tile pyramids. Millions of
+#                                       small files; generating and packing them
+#                                       needs fast local disk or it turns into a
+#                                       multi-hour crawl on a networked mount.
+#   WORK_SLOW (/mnt/g/lidar-output)  — everything else (OSM layers, finished
+#                                       .pmtiles). Few, larger files — a slower
+#                                       mount is fine, and it keeps this off the
+#                                       small local disk.
 # The viewer/tiles directory is populated at the end.
 #
 # Steps:
-#   1. OSM extraction        → $WORK/osm_layers/
-#   2. Vector PMTiles        → $WORK/dalarna.pmtiles
-#   3. RGBA overlay tiles    → $WORK/overlay-tiles/
-#   4. Overlay PMTiles       → $WORK/overlay.pmtiles
-#   5. Terrain RGB tiles     → $WORK/terrain-tiles/  → $WORK/terrain.pmtiles
+#   1. OSM extraction        → $WORK_SLOW/osm_layers/
+#   2. Vector PMTiles        → $WORK_SLOW/dalarna.pmtiles
+#   3. RGBA overlay tiles    → $WORK_FAST/overlay-tiles/
+#   4. Overlay PMTiles       → $WORK_SLOW/overlay.pmtiles
+#   5. Terrain RGB tiles     → $WORK_FAST/terrain-tiles/  → $WORK_SLOW/terrain.pmtiles
 #   6. Copy tiles to viewer
 #
 # Usage:
 #   bash build_pipeline.sh [--skip-osm] [--skip-overlay] [--skip-terrain]
 #   bash build_pipeline.sh --skip-osm                      # overlay + terrain only
 #   bash build_pipeline.sh --skip-terrain --skip-overlay   # OSM/vectors only
+#   bash build_pipeline.sh --work-fast=/path --work-slow=/path
 # =============================================================================
 set -euo pipefail
 
@@ -44,7 +53,8 @@ SKIP_OVERLAY=false
 SKIP_TERRAIN=false
 MAX_ZOOM=17
 BBOX="342500 6630000 600000 6900000"   # full Dalarna
-WORK="$HOME/lidar-output"
+WORK_FAST="$HOME/lidar-output"         # tile pyramids — needs fast local disk
+WORK_SLOW="/mnt/g/lidar-output"        # everything else — fine on a slower mount
 DTM_OVERRIDE=""   # override DTM source (single tile instead of merged VRT)
 CHM_OVERRIDE=""   # override CHM source
 WETNESS_OVERRIDE="" # override wetness source
@@ -56,7 +66,8 @@ for arg in "$@"; do
     --skip-terrain)  SKIP_TERRAIN=true ;;
     --max-zoom=*)    MAX_ZOOM="${arg#--max-zoom=}" ;;
     --bbox=*)        BBOX="${arg#--bbox=}" ;;
-    --work=*)        WORK="${arg#--work=}" ;;
+    --work-fast=*)   WORK_FAST="${arg#--work-fast=}" ;;
+    --work-slow=*)   WORK_SLOW="${arg#--work-slow=}" ;;
     --dtm=*)         DTM_OVERRIDE="${arg#--dtm=}" ;;
     --chm=*)         CHM_OVERRIDE="${arg#--chm=}" ;;
     --wetness=*)     WETNESS_OVERRIDE="${arg#--wetness=}" ;;
@@ -68,16 +79,17 @@ done
 [ -n "$WETNESS_OVERRIDE" ] && WETNESS="$WETNESS_OVERRIDE"
 
 # -----------------------------------------------------------------------------
-# All outputs go here (overridable with --work=)
+# Outputs go to WORK_FAST (tile pyramids) or WORK_SLOW (everything else),
+# overridable with --work-fast= / --work-slow=
 # -----------------------------------------------------------------------------
-mkdir -p "$WORK"
+mkdir -p "$WORK_FAST" "$WORK_SLOW"
 
-OSM_LAYERS="$WORK/osm_layers"
-VEC_PMTILES="$WORK/dalarna.pmtiles"
-OVERLAY_TILES="$WORK/overlay-tiles"
-OVERLAY_PMTILES="$WORK/overlay.pmtiles"
-TERRAIN_TILES="$WORK/terrain-tiles"
-TERRAIN_PMTILES="$WORK/terrain.pmtiles"
+OSM_LAYERS="$WORK_SLOW/osm_layers"
+VEC_PMTILES="$WORK_SLOW/dalarna.pmtiles"
+OVERLAY_TILES="$WORK_FAST/overlay-tiles"
+OVERLAY_PMTILES="$WORK_SLOW/overlay.pmtiles"
+TERRAIN_TILES="$WORK_FAST/terrain-tiles"
+TERRAIN_PMTILES="$WORK_SLOW/terrain.pmtiles"
 
 LIDAR_DIR="$(cd "$(dirname "$0")" && pwd)"
 VIEWER="$LIDAR_DIR/viewer/tiles"
