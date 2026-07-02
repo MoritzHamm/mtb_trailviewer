@@ -26,6 +26,8 @@ from rasterio.warp import reproject, Resampling, transform_bounds
 from rasterio.transform import Affine
 from scipy.ndimage import distance_transform_edt
 
+from log_utils import log, Progress
+
 TILE_SIZE   = 256
 HALF_WORLD  = 20037508.3427892
 WEB_MERC    = CRS.from_epsg(3857)
@@ -154,8 +156,8 @@ def generate_tiles(dtm_path: str | Path, out_dir: Path,
 
     with rasterio.open(dtm_path) as src:
         bounds_wgs84 = transform_bounds(src.crs, WGS84, *src.bounds)
-        print(f"Source CRS   : {src.crs}")
-        print(f"Nodata       : {src.nodata}")
+        log(f"Source CRS   : {src.crs}")
+        log(f"Nodata       : {src.nodata}")
 
     if bbox_3006 is not None:
         bbox_wgs84 = transform_bounds(CRS.from_epsg(3006), WGS84, *bbox_3006)
@@ -165,17 +167,16 @@ def generate_tiles(dtm_path: str | Path, out_dir: Path,
             min(bounds_wgs84[2], bbox_wgs84[2]),
             min(bounds_wgs84[3], bbox_wgs84[3]),
         )
-        print(f"bbox         : EPSG:3006 {bbox_3006}")
+        log(f"bbox         : EPSG:3006 {bbox_3006}")
 
     west, south, east, north = bounds_wgs84
-    print(f"Bounds WGS84 : {west:.4f}°E  {south:.4f}°N  {east:.4f}°E  {north:.4f}°N")
-    print()
+    log(f"Bounds WGS84 : {west:.4f}°E  {south:.4f}°N  {east:.4f}°E  {north:.4f}°N")
 
     # os.cpu_count() workers each hold their own GDAL handle/cache against the
     # source DTM; on a 24-thread machine that can exceed available RAM and
     # trigger the OOM killer (see generate_overlay_tiles.py for the same fix).
     workers = min(os.cpu_count() or 4, 8)
-    print(f"Using {workers} parallel workers\n")
+    log(f"Using {workers} parallel workers")
 
     total_written = 0
 
@@ -184,20 +185,21 @@ def generate_tiles(dtm_path: str | Path, out_dir: Path,
                      for tx, ty in tiles_for_bounds(west, south, east, north, z)]
         written = 0
 
-        print(f"Z{z:02d}  {len(tile_list)} candidate tiles", end="", flush=True)
+        log(f"Z{z:02d}  {len(tile_list)} candidate tiles")
 
+        progress = Progress(len(tile_list))
         with ProcessPoolExecutor(max_workers=workers) as pool:
             for i, result in enumerate(pool.map(_tile_worker, tile_list, chunksize=16)):
                 if result:
                     written += 1
-                if (i + 1) % 200 == 0:
-                    print(f"\n      {i+1}/{len(tile_list)} ({written} written)", end="", flush=True)
+                progress.update(i + 1, f"({written} written)")
+        progress.done()
 
-        print(f"\n      → {written} tiles written")
+        log(f"      → {written} tiles written")
         total_written += written
 
     write_coverage_geojson(bounds_wgs84, out_dir)
-    print(f"\nDone. {total_written} tiles total in {out_dir}")
+    log(f"Done. {total_written} tiles total in {out_dir}")
 
 
 def write_coverage_geojson(bounds_wgs84: tuple, out_dir: Path) -> None:
@@ -237,7 +239,7 @@ def write_coverage_geojson(bounds_wgs84: tuple, out_dir: Path) -> None:
     }
     path = out_dir / "coverage.geojson"
     path.write_text(json.dumps(geojson))
-    print(f"Coverage extent : {path}")
+    log(f"Coverage extent : {path}")
 
 
 # ---------------------------------------------------------------------------

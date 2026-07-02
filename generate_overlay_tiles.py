@@ -36,6 +36,8 @@ from rasterio.warp import reproject, Resampling, transform_bounds
 from rasterio.transform import Affine
 from scipy.ndimage import distance_transform_edt
 
+from log_utils import log, Progress
+
 TILE_SIZE       = 256
 HALF_WORLD      = 20037508.3427892
 WEB_MERC        = CRS.from_epsg(3857)
@@ -110,7 +112,7 @@ def _cache_region(src_path: str, west_wgs: float, south_wgs: float,
         dst.write(data)
 
     size_mb = dst_path.stat().st_size / 1e6
-    print(f"    cached {Path(src_path).name} → {name}  ({size_mb:.0f} MB)")
+    log(f"    cached {Path(src_path).name} → {name}  ({size_mb:.0f} MB)")
     return str(dst_path)
 
 
@@ -251,28 +253,28 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
             with rasterio.open(p) as src:
                 b = transform_bounds(src.crs, WGS84, *src.bounds)
                 all_bounds.append(b)
-                print(f"  {key:8s}: {src.crs.to_epsg()}  {src.width}×{src.height} px  "
-                      f"{b[0]:.3f}°E {b[1]:.3f}°N – {b[2]:.3f}°E {b[3]:.3f}°N")
+                log(f"  {key:8s}: {src.crs.to_epsg()}  {src.width}×{src.height} px  "
+                    f"{b[0]:.3f}°E {b[1]:.3f}°N – {b[2]:.3f}°E {b[3]:.3f}°N")
 
     if not all_bounds:
         raise RuntimeError("No input files provided.")
 
     if bbox_3006 is not None:
         all_bounds.append(transform_bounds(CRS.from_epsg(3006), WGS84, *bbox_3006))
-        print(f"  bbox    : EPSG:3006 {bbox_3006}")
+        log(f"  bbox    : EPSG:3006 {bbox_3006}")
 
     west  = max(b[0] for b in all_bounds)
     south = max(b[1] for b in all_bounds)
     east  = min(b[2] for b in all_bounds)
     north = min(b[3] for b in all_bounds)
-    print(f"\n  Intersect: {west:.3f}°E {south:.3f}°N – {east:.3f}°E {north:.3f}°N")
+    log(f"  Intersect: {west:.3f}°E {south:.3f}°N – {east:.3f}°E {north:.3f}°N")
 
     # Cache any sources on slow filesystems (/mnt/) to a local temp dir.
     # Workers only see the (possibly remapped) local paths.
     tmp_dir = out_dir / '.cache'
     tmp_dir.mkdir(exist_ok=True)
     cached_paths = {}
-    print("\n  Caching sources...")
+    log("  Caching sources...")
     for key, p in paths.items():
         if not p:
             cached_paths[key] = None
@@ -288,7 +290,7 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
     # trigger the OOM killer. Default to a conservative cap unless overridden.
     if workers is None:
         workers = min(os.cpu_count() or 4, 8)
-    print(f"\n  Workers : {workers}\n")
+    log(f"  Workers : {workers}")
 
     total_written = 0
     total_skipped = 0
@@ -304,9 +306,9 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
                 rows.setdefault(ty, []).append(tx)
 
         n_todo = sum(len(v) for v in rows.values())
-        print(f"Z{z:02d}  {len(all_tiles)} candidates  "
-              f"{len(existing)} existing  {n_todo} to generate "
-              f"in {len(rows)} strips")
+        log(f"Z{z:02d}  {len(all_tiles)} candidates  "
+            f"{len(existing)} existing  {n_todo} to generate "
+            f"in {len(rows)} strips")
 
         total_skipped += len(existing)
         if not rows:
@@ -322,21 +324,21 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
 
         written = 0
         strips_done = 0
+        progress = Progress(len(strip_args))
         with ProcessPoolExecutor(max_workers=workers) as pool:
             for result in pool.map(_strip_worker, strip_args, chunksize=1):
                 written += result
                 strips_done += 1
-                if strips_done % 10 == 0:
-                    print(f"      {strips_done}/{len(strip_args)} strips  "
-                          f"{written} tiles written", flush=True)
+                progress.update(strips_done, f"strips  {written} tiles written")
+        progress.done()
 
-        print(f"      → {written} tiles written")
+        log(f"      → {written} tiles written")
         total_written += written
 
-    print(f"\nDone. {total_written} new + {total_skipped} existing = "
-          f"{total_written + total_skipped} tiles in {out_dir}/")
-    print(f"\nNext: pack into PMTiles with")
-    print(f"  python pack_tiles.py {out_dir} overlay.pmtiles")
+    log(f"Done. {total_written} new + {total_skipped} existing = "
+        f"{total_written + total_skipped} tiles in {out_dir}/")
+    log(f"Next: pack into PMTiles with")
+    log(f"  python pack_tiles.py {out_dir} overlay.pmtiles")
 
 
 def main() -> None:
@@ -366,7 +368,7 @@ def main() -> None:
     if not any(paths.values()):
         ap.error("Provide at least one of --chm, --wetness")
 
-    print("Overlay tile inputs:")
+    log("Overlay tile inputs:")
     bbox_3006 = tuple(args.bbox) if args.bbox else None
     generate_overlay_tiles(paths, Path(args.out), *args.zoom,
                             workers=args.workers, bbox_3006=bbox_3006)

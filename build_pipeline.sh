@@ -26,6 +26,8 @@
 # =============================================================================
 set -euo pipefail
 
+log() { printf '[%(%H:%M:%S)T] %s\n' -1 "$1"; }
+
 # -----------------------------------------------------------------------------
 # Sources  (only place that references external drives)
 # -----------------------------------------------------------------------------
@@ -86,30 +88,22 @@ source ~/lidar-env/bin/activate
 # Step 1: OSM extraction
 # -----------------------------------------------------------------------------
 if [ "$SKIP_OSM" = false ]; then
-  echo "========================================"
-  echo "Step 1a: Extracting OSM ways + nodes"
-  echo "========================================"
+  log "Step 1a: Extracting OSM ways + nodes"
   python "$LIDAR_DIR/extract_osm.py" \
     --bbox $BBOX --pbf "$OSM_PBF" --out "$OSM_LAYERS"
 
-  echo ""
-  echo "========================================"
-  echo "Step 1b: Extracting OSM polygons"
-  echo "========================================"
+  log "Step 1b: Extracting OSM polygons"
   python "$LIDAR_DIR/extract_osm_polygons.py" \
     --bbox $BBOX --pbf "$OSM_PBF" --out "$OSM_LAYERS"
 else
-  echo "Skipping OSM extraction (--skip-osm)"
+  log "Skipping OSM extraction (--skip-osm)"
 fi
 
 # -----------------------------------------------------------------------------
 # Step 2: Vector PMTiles
 # -----------------------------------------------------------------------------
 if [ "$SKIP_OSM" = false ]; then
-  echo ""
-  echo "========================================"
-  echo "Step 2: Building vector PMTiles"
-  echo "========================================"
+  log "Step 2: Building vector PMTiles"
 
   # Line layers: never drop features — trails are the whole point
   LINE_ARGS=()
@@ -117,7 +111,7 @@ if [ "$SKIP_OSM" = false ]; then
     f="$OSM_LAYERS/${layer}.geojson"
     [ -f "$f" ] && LINE_ARGS+=(
       "--no-feature-limit" "--no-tile-size-limit" "-L" "${layer}:${f}") \
-                || echo "  Skipping missing layer: $layer"
+                || log "  Skipping missing layer: $layer"
   done
 
   # Polygon layers: allow dropping in dense areas (buildings/landuse bloat tiles)
@@ -125,7 +119,7 @@ if [ "$SKIP_OSM" = false ]; then
   for layer in water landuse buildings; do
     f="$OSM_LAYERS/${layer}.geojson"
     [ -f "$f" ] && POLY_ARGS+=("-L" "${layer}:${f}") \
-                || echo "  Skipping missing layer: $layer"
+                || log "  Skipping missing layer: $layer"
   done
 
   # Point layers: never drop
@@ -134,7 +128,7 @@ if [ "$SKIP_OSM" = false ]; then
     f="$OSM_LAYERS/${layer}.geojson"
     [ -f "$f" ] && POINT_ARGS+=(
       "--no-feature-limit" "--no-tile-size-limit" "-L" "${layer}:${f}") \
-                || echo "  Skipping missing layer: $layer"
+                || log "  Skipping missing layer: $layer"
   done
 
   tippecanoe \
@@ -144,19 +138,16 @@ if [ "$SKIP_OSM" = false ]; then
     --read-parallel \
     "${LINE_ARGS[@]}" "${POLY_ARGS[@]}" "${POINT_ARGS[@]}"
 
-  echo "Written: $VEC_PMTILES"
+  log "Written: $VEC_PMTILES"
 else
-  echo "Skipping vector PMTiles (--skip-osm)"
+  log "Skipping vector PMTiles (--skip-osm)"
 fi
 
 # -----------------------------------------------------------------------------
 # Step 3 + 4: Overlay tiles
 # -----------------------------------------------------------------------------
 if [ "$SKIP_OVERLAY" = false ]; then
-  echo ""
-  echo "========================================"
-  echo "Step 3: Generating RGBA overlay tiles"
-  echo "========================================"
+  log "Step 3: Generating RGBA overlay tiles"
 
   OVERLAY_ARGS=(--out "$OVERLAY_TILES" --bbox $BBOX)
   [ -n "$CHM_VRT"  ] && [ -f "$CHM_VRT"  ] && OVERLAY_ARGS+=(--chm "$CHM_VRT")
@@ -164,56 +155,43 @@ if [ "$SKIP_OVERLAY" = false ]; then
 
   python "$LIDAR_DIR/generate_overlay_tiles.py" "${OVERLAY_ARGS[@]}" --zoom 12 "$MAX_ZOOM"
 
-  echo ""
-  echo "========================================"
-  echo "Step 4: Packing overlay tiles → PMTiles"
-  echo "========================================"
+  log "Step 4: Packing overlay tiles → PMTiles"
   python "$LIDAR_DIR/pack_tiles.py" "$OVERLAY_TILES" "$OVERLAY_PMTILES" --name overlay
 else
-  echo "Skipping overlay tiles (--skip-overlay)"
+  log "Skipping overlay tiles (--skip-overlay)"
 fi
 
 # -----------------------------------------------------------------------------
 # Step 5: Terrain RGB tiles
 # -----------------------------------------------------------------------------
 if [ "$SKIP_TERRAIN" = false ]; then
-  echo ""
-  echo "========================================"
-  echo "Step 5: Generating terrain RGB tiles"
-  echo "========================================"
+  log "Step 5: Generating terrain RGB tiles"
   if [ ! -f "$DTM_VRT" ]; then
-    echo "ERROR: DTM not found at $DTM_VRT"
+    log "ERROR: DTM not found at $DTM_VRT"
     exit 1
   fi
   python "$LIDAR_DIR/generate_elevation_tiles.py" \
     "$DTM_VRT" "$TERRAIN_TILES" --zoom 12 "$MAX_ZOOM" --bbox $BBOX
 
-  echo ""
-  echo "========================================"
-  echo "Step 5b: Packing terrain tiles → PMTiles"
-  echo "========================================"
+  log "Step 5b: Packing terrain tiles → PMTiles"
   python "$LIDAR_DIR/pack_tiles.py" \
     "$TERRAIN_TILES" "$TERRAIN_PMTILES" --name terrain
 else
-  echo "Skipping terrain tiles (--skip-terrain)"
+  log "Skipping terrain tiles (--skip-terrain)"
 fi
 
 # -----------------------------------------------------------------------------
 # Step 6: Copy to viewer
 # -----------------------------------------------------------------------------
-echo ""
-echo "========================================"
-echo "Step 6: Copying to viewer"
-echo "========================================"
+log "Step 6: Copying to viewer"
 mkdir -p "$VIEWER"
 
 copy_if_exists() {
-  [ -f "$1" ] && cp "$1" "$2" && echo "  $2" || echo "  SKIP (not built): $1"
+  [ -f "$1" ] && cp "$1" "$2" && log "  $2" || log "  SKIP (not built): $1"
 }
 
 copy_if_exists "$VEC_PMTILES"     "$VIEWER/dalarna.pmtiles"
 copy_if_exists "$OVERLAY_PMTILES" "$VIEWER/overlay.pmtiles"
 copy_if_exists "$TERRAIN_PMTILES" "$VIEWER/terrain.pmtiles"
 
-echo ""
-echo "Pipeline complete."
+log "Pipeline complete."

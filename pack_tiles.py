@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from log_utils import log, Progress
+
 
 def dir_to_mbtiles(tile_dir: Path, mbtiles_path: Path, name: str) -> int:
     conn = sqlite3.connect(mbtiles_path)
@@ -38,7 +40,7 @@ def dir_to_mbtiles(tile_dir: Path, mbtiles_path: Path, name: str) -> int:
         if p.is_dir() and p.name.isdigit()
     )
     if not zoom_levels:
-        print("ERROR: no zoom-level directories found")
+        log("ERROR: no zoom-level directories found")
         sys.exit(1)
 
     c.executemany("INSERT OR REPLACE INTO metadata VALUES (?, ?)", [
@@ -51,7 +53,13 @@ def dir_to_mbtiles(tile_dir: Path, mbtiles_path: Path, name: str) -> int:
         ('maxzoom',     str(max(zoom_levels))),
     ])
 
+    log("  Counting tiles...")
+    total = sum(1 for z in zoom_levels
+                for x_dir in (tile_dir / str(z)).iterdir() if x_dir.is_dir()
+                for _ in x_dir.glob('*.png'))
+
     count = 0
+    progress = Progress(total)
     for z in zoom_levels:
         z_dir = tile_dir / str(z)
         for x_dir in z_dir.iterdir():
@@ -69,13 +77,14 @@ def dir_to_mbtiles(tile_dir: Path, mbtiles_path: Path, name: str) -> int:
                 count += 1
                 if count % 2000 == 0:
                     conn.commit()
-                    print(f"  {count:,} tiles written…", end='\r', flush=True)
+                    progress.update(count, "tiles written")
+    progress.done()
 
     conn.commit()
     c.execute("CREATE INDEX IF NOT EXISTS tile_index ON tiles (zoom_level, tile_column, tile_row)")
     conn.commit()
     conn.close()
-    print(f"  {count:,} tiles → {mbtiles_path} ({mbtiles_path.stat().st_size / 1e9:.2f} GB)")
+    log(f"  {count:,} tiles → {mbtiles_path} ({mbtiles_path.stat().st_size / 1e9:.2f} GB)")
     return count
 
 
@@ -88,14 +97,14 @@ def mbtiles_to_pmtiles(mbtiles: Path, output: Path) -> None:
             check=True, text=True, capture_output=True,
         )
         if result.stdout:
-            print(result.stdout.strip())
+            log(result.stdout.strip())
     except FileNotFoundError:
-        print("\nERROR: 'pmtiles' CLI not found. Install it with:")
-        print("  wget -qO- https://github.com/protomaps/go-pmtiles/releases/download/v1.30.3/"
-              "go-pmtiles_1.30.3_Linux_x86_64.tar.gz | tar xz pmtiles && mv pmtiles ~/.local/bin/")
+        log("ERROR: 'pmtiles' CLI not found. Install it with:")
+        log("  wget -qO- https://github.com/protomaps/go-pmtiles/releases/download/v1.30.3/"
+            "go-pmtiles_1.30.3_Linux_x86_64.tar.gz | tar xz pmtiles && mv pmtiles ~/.local/bin/")
         sys.exit(1)
     except subprocess.CalledProcessError as e:
-        print(f"ERROR: pmtiles convert failed:\n{e.stderr}")
+        log(f"ERROR: pmtiles convert failed:\n{e.stderr}")
         sys.exit(1)
 
 
@@ -112,27 +121,20 @@ def main() -> None:
     mbtiles  = output.with_suffix('.mbtiles')
 
     if not tile_dir.is_dir():
-        print(f"ERROR: {tile_dir} is not a directory")
+        log(f"ERROR: {tile_dir} is not a directory")
         sys.exit(1)
 
-    print(f"Step 1/2  Building MBTiles from {tile_dir}/")
+    log(f"Step 1/2  Building MBTiles from {tile_dir}/")
     dir_to_mbtiles(tile_dir, mbtiles, args.name)
 
-    print(f"Step 2/2  Converting MBTiles → PMTiles")
+    log(f"Step 2/2  Converting MBTiles → PMTiles")
     mbtiles_to_pmtiles(mbtiles, output)
 
     if not args.keep_mbtiles:
         mbtiles.unlink()
 
     size_mb = output.stat().st_size / 1e6
-    print(f"\nDone: {output}  ({size_mb:.0f} MB)")
-    print()
-    print("To use this file, update the terrain source in index.html:")
-    print(f"  Replace:  tiles: ['http://localhost:8080/tiles/{{z}}/{{x}}/{{y}}.png']")
-    print(f"  With:     url: 'pmtiles://http://localhost:8080/tiles/{output.name}',")
-    print()
-    print("serve.py already supports HTTP Range requests, so local testing works as-is.")
-
+    log(f"Done: {output}  ({size_mb:.0f} MB)")
 
 if __name__ == '__main__':
     main()
