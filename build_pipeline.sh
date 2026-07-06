@@ -202,8 +202,16 @@ copy_if_exists() {
   [ -f "$1" ] && cp "$1" "$2" && log "  $2" || log "  SKIP (not built): $1"
 }
 
+# Overlay/terrain pmtiles are hosted from WORK_SLOW (e.g. R2/Cloudflare in
+# production) rather than bundled with the app — symlink instead of copying,
+# so the viewer can still read them locally without duplicating hundreds of GB
+# onto the local disk.
+link_if_exists() {
+  [ -f "$1" ] && ln -sf "$1" "$2" && log "  $2 -> $1" || log "  SKIP (not built): $1"
+}
+
 copy_if_exists "$VEC_PMTILES"     "$VIEWER/dalarna.pmtiles"
-copy_if_exists "$OVERLAY_PMTILES" "$VIEWER/overlay.pmtiles"
-copy_if_exists "$TERRAIN_PMTILES" "$VIEWER/terrain.pmtiles"
+link_if_exists "$OVERLAY_PMTILES" "$VIEWER/overlay.pmtiles"
+link_if_exists "$TERRAIN_PMTILES" "$VIEWER/terrain.pmtiles"
 
 log "Pipeline complete."
