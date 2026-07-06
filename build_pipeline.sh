@@ -213,5 +213,6 @@ link_if_exists() {
 copy_if_exists "$VEC_PMTILES"     "$VIEWER/dalarna.pmtiles"
 link_if_exists "$OVERLAY_PMTILES" "$VIEWER/overlay.pmtiles"
 link_if_exists "$TERRAIN_PMTILES" "$VIEWER/terrain.pmtiles"
+copy_if_exists "$TERRAIN_TILES/coverage.geojson" "$VIEWER/coverage.geojson"
 
 log "Pipeline complete."

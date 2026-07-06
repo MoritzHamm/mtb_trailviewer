@@ -54,6 +54,8 @@
     <option value="osm">OpenStreetMap</option>
     <option value="satellite">Satellite (Esri)</option>
     <option value="slope">Slope colors</option>
+    <option value="wetness">Wetness</option>
+    <option value="vegetation">Vegetation height</option>
     <option value="none">None</option>
   </select>
 
@@ -150,9 +152,64 @@ maplibregl.addProtocol('slope', async (params) => {
   }
 });
 
-const CENTER_LNG = 15.625;   // Lövberget / Falun area
-const CENTER_LAT = 60.608;
-const START_ZOOM = 13;
+// ---------------------------------------------------------------------------
+// Wetness / vegetation-height overlay protocols — decode a single channel of
+// the packed overlay RGBA tiles (see generate_overlay_tiles.py: B=CHM, A=wetness)
+// into a simple two-stop color ramp.
+// ---------------------------------------------------------------------------
+const overlayTiles = new pmtiles.PMTiles(`${TILE_BASE}/overlay.pmtiles`);
+
+function lerpColor(c0, c1, t) {
+  return [
+    Math.round(c0[0] + (c1[0] - c0[0]) * t),
+    Math.round(c0[1] + (c1[1] - c0[1]) * t),
+    Math.round(c0[2] + (c1[2] - c0[2]) * t),
+  ];
+}
+
+function makeChannelProtocol(channelIndex, colorLow, colorHigh) {
+  return async (params) => {
+    const proto = params.url.split('://')[0];
+    const [z, x, y] = params.url.replace(`${proto}://`, '').split('/').map(Number);
+    try {
+      const tile = await overlayTiles.getZxy(z, x, y);
+      if (!tile) throw new Error('not found');
+      // premultiplyAlpha:'none' — we're reading wetness out of the alpha
+      // channel as plain data, not as real transparency, so it must survive
+      // decode untouched.
+      const srcBitmap = await createImageBitmap(new Blob([tile.data]), { premultiplyAlpha: 'none' });
+
+      const S = 256;
+      const srcCtx = new OffscreenCanvas(S, S).getContext('2d');
+      srcCtx.drawImage(srcBitmap, 0, 0);
+      const { data: src } = srcCtx.getImageData(0, 0, S, S);
+
+      const out = new ImageData(S, S);
+      const dst = out.data;
+      for (let i = 0; i < src.length; i += 4) {
+        const t = src[i + channelIndex] / 255;
+        const [r, g, b] = lerpColor(colorLow, colorHigh, t);
+        dst[i] = r; dst[i + 1] = g; dst[i + 2] = b; dst[i + 3] = 255;
+      }
+
+      const dstCanvas = new OffscreenCanvas(S, S);
+      dstCanvas.getContext('2d').putImageData(out, 0, 0);
+      const blob = await dstCanvas.convertToBlob({ type: 'image/png' });
+      return { data: await blob.arrayBuffer() };
+    } catch (_) {
+      return { data: new ArrayBuffer(0) };
+    }
+  };
+}
+
+// A channel = wetness: dry (tan) → wet (blue)
+maplibregl.addProtocol('wetness', makeChannelProtocol(3, [168, 138, 91], [27, 79, 114]));
+// B channel = CHM: bare ground (tan) → 35m canopy (dark green)
+maplibregl.addProtocol('vegheight', makeChannelProtocol(2, [194, 178, 128], [18, 63, 18]));
+
+const CENTER_LNG = 14.445;   // full Dalarna region
+const CENTER_LAT = 61.005;
+const START_ZOOM = 8;
 
 const map = new maplibregl.Map({
   container: 'map',
@@ -194,6 +251,20 @@ const map = new maplibregl.Map({
         minzoom: 8,
         maxzoom: 15,
       },
+      'wetness-tiles': {
+        type: 'raster',
+        tiles: ['wetness://{z}/{x}/{y}'],
+        tileSize: 256,
+        minzoom: 12,
+        maxzoom: 17,
+      },
+      'vegheight-tiles': {
+        type: 'raster',
+        tiles: ['vegheight://{z}/{x}/{y}'],
+        tileSize: 256,
+        minzoom: 12,
+        maxzoom: 17,
+      },
       osmvec: {
         type: 'vector',
         url: `pmtiles://${TILE_BASE}/dalarna.pmtiles`,
@@ -208,6 +279,14 @@ const map = new maplibregl.Map({
       { id: 'slope-overlay', type: 'raster', source: 'slope-tiles',
         layout: { visibility: 'none' },
         paint: { 'raster-opacity': 0.65, 'raster-fade-duration': 0 },
+      },
+      { id: 'wetness-overlay', type: 'raster', source: 'wetness-tiles',
+        layout: { visibility: 'none' },
+        paint: { 'raster-opacity': 0.7, 'raster-fade-duration': 0 },
+      },
+      { id: 'vegheight-overlay', type: 'raster', source: 'vegheight-tiles',
+        layout: { visibility: 'none' },
+        paint: { 'raster-opacity': 0.7, 'raster-fade-duration': 0 },
       },
       { id: 'hillshade', type: 'hillshade', source: 'terrain', paint: {
           'hillshade-illumination-anchor': 'map',
@@ -303,14 +382,16 @@ const map = new maplibregl.Map({
         paint: { 'text-color': '#fff', 'text-halo-color': '#222', 'text-halo-width': 1.5,
                  'text-opacity': ['interpolate', ['linear'], ['zoom'], 7, 0.7, 12, 1.0] },
       },
-      // grey-out everything outside the tile coverage
+      // grey-out everything outside the tile coverage — disabled for now
       { id: 'coverage-mask', type: 'fill', source: 'coverage',
         filter: ['==', ['get', 'type'], 'mask'],
+        layout: { visibility: 'none' },
         paint: { 'fill-color': '#888888', 'fill-opacity': 0.35 },
       },
-      // dashed orange border around the coverage extent
+      // dashed orange border around the coverage extent — disabled for now
       { id: 'coverage-border', type: 'line', source: 'coverage',
         filter: ['==', ['get', 'type'], 'border'],
+        layout: { visibility: 'none' },
         paint: { 'line-color': '#ff7733', 'line-width': 2, 'line-dasharray': [4, 3] },
       },
     ],
@@ -556,11 +637,17 @@ map.on('mouseleave', () => {
 // Background selector
 // ---------------------------------------------------------------------------
 const BG_LAYERS = { osm: 'bg-osm', satellite: 'bg-satellite' };
+const CHANNEL_BG_LAYERS = {
+  slope: 'slope-overlay',
+  wetness: 'wetness-overlay',
+  vegetation: 'vegheight-overlay',
+};
 
 function applyBackground(chosen) {
   Object.entries(BG_LAYERS).forEach(([key, id]) =>
     map.setLayoutProperty(id, 'visibility', key === chosen ? 'visible' : 'none'));
-  map.setLayoutProperty('slope-overlay', 'visibility', chosen === 'slope' ? 'visible' : 'none');
+  Object.entries(CHANNEL_BG_LAYERS).forEach(([key, id]) =>
+    map.setLayoutProperty(id, 'visibility', key === chosen ? 'visible' : 'none'));
 }
 
 document.getElementById('bg-select').addEventListener('change', e => {
