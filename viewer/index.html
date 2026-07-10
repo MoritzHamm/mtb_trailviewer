@@ -7,6 +7,7 @@
   <script src="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.js"></script>
   <link   href="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.css" rel="stylesheet">
   <script src="https://unpkg.com/pmtiles@3.2.0/dist/pmtiles.js"></script>
+  <script src="style-config.js"></script>
   <link href="style.css" rel="stylesheet">
 </head>
 <body>
@@ -99,9 +100,35 @@ maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile.bind(pmtilesProtocol));
 // Shared PMTiles instance for terrain — reused by the slope protocol below
 const terrainTiles  = new pmtiles.PMTiles(`${TILE_BASE}/terrain.pmtiles`);
 
+function hexToRgb(hex) {
+  const n = parseInt(hex.replace('#', ''), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function lerpColor(c0, c1, t) {
+  return [
+    Math.round(c0[0] + (c1[0] - c0[0]) * t),
+    Math.round(c0[1] + (c1[1] - c0[1]) * t),
+    Math.round(c0[2] + (c1[2] - c0[2]) * t),
+  ];
+}
+
+// Piecewise-linear color for a slope angle (degrees) against VIEWER_STYLE.slope.stops.
+function slopeColor(deg) {
+  const stops = VIEWER_STYLE.slope.stops;
+  if (deg <= stops[0].deg) return stops[0].color;
+  for (let i = 1; i < stops.length; i++) {
+    if (deg <= stops[i].deg) {
+      const t = (deg - stops[i - 1].deg) / (stops[i].deg - stops[i - 1].deg);
+      return lerpColor(stops[i - 1].color, stops[i].color, t);
+    }
+  }
+  return stops[stops.length - 1].color;   // clamp beyond the last stop
+}
+
 // ---------------------------------------------------------------------------
 // Slope overlay protocol — computes slope from terrain-RGB tiles in the browser
-// Returns a blue (flat) → red (steep, ≥50°) colored PNG tile
+// and colors it per VIEWER_STYLE.slope.stops (see style-config.js)
 // ---------------------------------------------------------------------------
 maplibregl.addProtocol('slope', async (params) => {
   try {
@@ -136,13 +163,7 @@ maplibregl.addProtocol('slope', async (params) => {
         const dx = (ele(r, c + 1) - ele(r, c - 1)) / (spanC * mpp);
         const dy = (ele(r + 1, c) - ele(r - 1, c)) / (spanR * mpp);
         const deg = Math.atan(Math.sqrt(dx * dx + dy * dy)) * 180 / Math.PI;
-        // 0°=blue · 12.5°=cyan · 25°=green · 37.5°=yellow · ≥50°=red
-        const t = Math.min(deg / 50, 1);
-        let R, G, B;
-        if      (t < 0.25) { R = 0;   G = Math.round(t * 4 * 255);               B = 255; }
-        else if (t < 0.5)  { R = 0;   G = 255;                                    B = Math.round((1 - (t - 0.25) * 4) * 255); }
-        else if (t < 0.75) { R = Math.round((t - 0.5) * 4 * 255);  G = 255;      B = 0; }
-        else               { R = 255; G = Math.round((1 - (t - 0.75) * 4) * 255); B = 0; }
+        const [R, G, B] = slopeColor(deg);
         const i = (r * S + c) * 4;
         dst[i] = R; dst[i + 1] = G; dst[i + 2] = B; dst[i + 3] = 255;
       }
@@ -160,17 +181,9 @@ maplibregl.addProtocol('slope', async (params) => {
 // ---------------------------------------------------------------------------
 // Wetness / vegetation-height overlay protocols — decode a single channel of
 // the packed overlay RGBA tiles (see generate_overlay_tiles.py: B=CHM, A=wetness)
-// into a simple two-stop color ramp.
+// into the two-stop ramps from VIEWER_STYLE (style-config.js).
 // ---------------------------------------------------------------------------
 const overlayTiles = new pmtiles.PMTiles(`${TILE_BASE}/overlay.pmtiles`);
-
-function lerpColor(c0, c1, t) {
-  return [
-    Math.round(c0[0] + (c1[0] - c0[0]) * t),
-    Math.round(c0[1] + (c1[1] - c0[1]) * t),
-    Math.round(c0[2] + (c1[2] - c0[2]) * t),
-  ];
-}
 
 function makeChannelProtocol(channelIndex, colorLow, colorHigh) {
   return async (params) => {
@@ -207,10 +220,11 @@ function makeChannelProtocol(channelIndex, colorLow, colorHigh) {
   };
 }
 
-// A channel = wetness: dry (tan) → wet (blue)
-maplibregl.addProtocol('wetness', makeChannelProtocol(3, [168, 138, 91], [27, 79, 114]));
-// B channel = CHM: bare ground (tan) → 35m canopy (dark green)
-maplibregl.addProtocol('vegheight', makeChannelProtocol(2, [194, 178, 128], [18, 63, 18]));
+// A channel = wetness, B channel = CHM (see generate_overlay_tiles.py)
+maplibregl.addProtocol('wetness',
+  makeChannelProtocol(3, VIEWER_STYLE.wetness.colorLow, VIEWER_STYLE.wetness.colorHigh));
+maplibregl.addProtocol('vegheight',
+  makeChannelProtocol(2, VIEWER_STYLE.vegheight.colorLow, VIEWER_STYLE.vegheight.colorHigh));
 
 const CENTER_LNG = 14.445;   // full Dalarna region
 const CENTER_LAT = 61.005;
@@ -277,7 +291,7 @@ const map = new maplibregl.Map({
       },
     },
     layers: [
-      { id: 'bg-solid', type: 'background', paint: { 'background-color': '#2a2e35' } },
+      { id: 'bg-solid', type: 'background', paint: { 'background-color': VIEWER_STYLE.background.solid } },
       { id: 'bg-osm',       type: 'raster', source: 'osm',       paint: { 'raster-opacity': 1.0 } },
       { id: 'bg-satellite', type: 'raster', source: 'satellite', paint: { 'raster-opacity': 1.0 },
         layout: { visibility: 'none' } },
@@ -295,83 +309,77 @@ const map = new maplibregl.Map({
       },
       { id: 'hillshade', type: 'hillshade', source: 'terrain', paint: {
           'hillshade-illumination-anchor': 'map',
-          'hillshade-illumination-direction': 315,
-          'hillshade-exaggeration': 0.6,
-          'hillshade-shadow-color': '#2a2a3a',
-          'hillshade-highlight-color': '#fffbe8',
+          'hillshade-illumination-direction': VIEWER_STYLE.hillshade.illuminationDirection,
+          'hillshade-exaggeration': VIEWER_STYLE.hillshade.exaggeration,
+          'hillshade-shadow-color': VIEWER_STYLE.hillshade.shadowColor,
+          'hillshade-highlight-color': VIEWER_STYLE.hillshade.highlightColor,
         }
       },
       // --- OSM vector overlay ---
       // Landuse fill (forest, farmland …)
       { id: 'osm-landuse', type: 'fill', source: 'osmvec', 'source-layer': 'landuse', minzoom: 9,
         paint: { 'fill-color': ['match', ['get', 'landuse'],
-            'forest', '#2d4a2d', 'wood', '#2d4a2d',
-            'farmland', '#6b7a3a', 'meadow', '#4a6b3a',
-            'wetland', '#3a5a6b', 'heath', '#5a4a3a',
-            '#333'
-          ], 'fill-opacity': 0.35 },
+            ...VIEWER_STYLE.osm.landuse.match,
+            VIEWER_STYLE.osm.landuse.fallback,
+          ], 'fill-opacity': VIEWER_STYLE.osm.landuse.opacity },
       },
       // Water polygons
       { id: 'osm-water', type: 'fill', source: 'osmvec', 'source-layer': 'water', minzoom: 6,
-        paint: { 'fill-color': '#2a5f7a', 'fill-opacity': 0.7 },
+        paint: { 'fill-color': VIEWER_STYLE.osm.water.color, 'fill-opacity': VIEWER_STYLE.osm.water.opacity },
       },
       // Buildings
       { id: 'osm-buildings', type: 'fill', source: 'osmvec', 'source-layer': 'buildings', minzoom: 14,
-        paint: { 'fill-color': '#555', 'fill-opacity': 0.6 },
+        paint: { 'fill-color': VIEWER_STYLE.osm.buildings.color, 'fill-opacity': VIEWER_STYLE.osm.buildings.opacity },
       },
       // Motor roads — casing
       { id: 'osm-road-casing', type: 'line', source: 'osmvec', 'source-layer': 'roads', minzoom: 9,
         layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: { 'line-color': '#222', 'line-width': ['interpolate', ['linear'], ['zoom'],
-          10, 2, 14, 5, 16, 8], 'line-opacity': 0.7 },
+        paint: { 'line-color': VIEWER_STYLE.osm.roadCasing.color, 'line-width': ['interpolate', ['linear'], ['zoom'],
+          10, 2, 14, 5, 16, 8], 'line-opacity': VIEWER_STYLE.osm.roadCasing.opacity },
       },
       // Motor roads — fill
       { id: 'osm-road-fill', type: 'line', source: 'osmvec', 'source-layer': 'roads', minzoom: 9,
         layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: { 'line-color': '#fff', 'line-width': ['interpolate', ['linear'], ['zoom'],
-          10, 1, 14, 3, 16, 5], 'line-opacity': 0.85 },
+        paint: { 'line-color': VIEWER_STYLE.osm.roadFill.color, 'line-width': ['interpolate', ['linear'], ['zoom'],
+          10, 1, 14, 3, 16, 5], 'line-opacity': VIEWER_STYLE.osm.roadFill.opacity },
       },
       // Tracks
       { id: 'osm-track', type: 'line', source: 'osmvec', 'source-layer': 'tracks', minzoom: 11,
         layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: { 'line-color': '#d4a853', 'line-width': ['interpolate', ['linear'], ['zoom'],
-          11, 0.5, 14, 2, 16, 3], 'line-opacity': 0.9 },
+        paint: { 'line-color': VIEWER_STYLE.osm.track.color, 'line-width': ['interpolate', ['linear'], ['zoom'],
+          11, 0.5, 14, 2, 16, 3], 'line-opacity': VIEWER_STYLE.osm.track.opacity },
       },
       // Paths, footways, cycleways — coloured by mtb:scale where available
       { id: 'osm-path', type: 'line', source: 'osmvec', 'source-layer': 'paths', minzoom: 12,
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
           'line-width': ['interpolate', ['linear'], ['zoom'], 12, 0.5, 14, 2, 16, 3],
-          'line-opacity': 0.95,
+          'line-opacity': VIEWER_STYLE.osm.path.opacity,
           'line-color': ['match', ['get', 'mtb_scale'],
-            '0',  '#4caf50',
-            '1',  '#2196f3',
-            '1+', '#1565c0',
-            '2',  '#e53935',
-            '3',  '#880e4f',
-            '#aaaaaa',
+            ...VIEWER_STYLE.osm.path.mtbScale.match,
+            VIEWER_STYLE.osm.path.mtbScale.fallback,
           ],
         },
       },
       // Waterways
       { id: 'osm-waterway', type: 'line', source: 'osmvec', 'source-layer': 'waterways', minzoom: 11,
         layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: { 'line-color': '#5ab4d4', 'line-width': ['interpolate', ['linear'], ['zoom'],
-          11, 0.5, 14, 1.5, 16, 2.5], 'line-opacity': 0.85 },
+        paint: { 'line-color': VIEWER_STYLE.osm.waterway.color, 'line-width': ['interpolate', ['linear'], ['zoom'],
+          11, 0.5, 14, 1.5, 16, 2.5], 'line-opacity': VIEWER_STYLE.osm.waterway.opacity },
       },
       // Railways
       { id: 'osm-railway', type: 'line', source: 'osmvec', 'source-layer': 'railways', minzoom: 8,
         layout: { 'line-join': 'round', 'line-cap': 'butt' },
-        paint: { 'line-color': '#888', 'line-width': ['interpolate', ['linear'], ['zoom'],
+        paint: { 'line-color': VIEWER_STYLE.osm.railway.color, 'line-width': ['interpolate', ['linear'], ['zoom'],
           8, 1, 14, 3], 'line-dasharray': [3, 2] },
       },
       // Power lines
       { id: 'osm-power', type: 'line', source: 'osmvec', 'source-layer': 'powerlines', minzoom: 11,
-        paint: { 'line-color': '#cc0', 'line-width': 1, 'line-opacity': 0.5 },
+        paint: { 'line-color': VIEWER_STYLE.osm.power.color, 'line-width': 1, 'line-opacity': VIEWER_STYLE.osm.power.opacity },
       },
       // Natural lines (cliffs etc.)
       { id: 'osm-natural-lines', type: 'line', source: 'osmvec', 'source-layer': 'natural_lines', minzoom: 12,
-        paint: { 'line-color': '#a0522d', 'line-width': 1.5, 'line-opacity': 0.8 },
+        paint: { 'line-color': VIEWER_STYLE.osm.naturalLines.color, 'line-width': 1.5, 'line-opacity': VIEWER_STYLE.osm.naturalLines.opacity },
       },
       // Peak layers added dynamically in map.on('load') below
       // (triangle uses a canvas image — Open Sans Bold lacks the ▲ glyph)
@@ -384,20 +392,20 @@ const map = new maplibregl.Map({
             'city', 16, 'town', 13, 'village', 11, 10],
           'text-anchor': 'center',
         },
-        paint: { 'text-color': '#fff', 'text-halo-color': '#222', 'text-halo-width': 1.5,
+        paint: { 'text-color': VIEWER_STYLE.osm.places.textColor, 'text-halo-color': VIEWER_STYLE.osm.places.haloColor, 'text-halo-width': 1.5,
                  'text-opacity': ['interpolate', ['linear'], ['zoom'], 7, 0.7, 12, 1.0] },
       },
       // grey-out everything outside the tile coverage — disabled for now
       { id: 'coverage-mask', type: 'fill', source: 'coverage',
         filter: ['==', ['get', 'type'], 'mask'],
         layout: { visibility: 'none' },
-        paint: { 'fill-color': '#888888', 'fill-opacity': 0.35 },
+        paint: { 'fill-color': VIEWER_STYLE.coverage.maskColor, 'fill-opacity': VIEWER_STYLE.coverage.maskOpacity },
       },
       // dashed orange border around the coverage extent — disabled for now
       { id: 'coverage-border', type: 'line', source: 'coverage',
         filter: ['==', ['get', 'type'], 'border'],
         layout: { visibility: 'none' },
-        paint: { 'line-color': '#ff7733', 'line-width': 2, 'line-dasharray': [4, 3] },
+        paint: { 'line-color': VIEWER_STYLE.coverage.borderColor, 'line-width': 2, 'line-dasharray': [4, 3] },
       },
     ],
   },
@@ -701,8 +709,9 @@ toggleOsmAreas.addEventListener('change', e => {
 // (Open Sans Bold lacks the ▲ glyph; icon-image is more reliable)
 // ---------------------------------------------------------------------------
 map.on('load', () => {
-  // Draw an orange triangle into a raw pixel buffer
+  // Draw a triangle (colored per VIEWER_STYLE.osm.peak) into a raw pixel buffer
   const sz = 22;
+  const [peakR, peakG, peakB] = hexToRgb(VIEWER_STYLE.osm.peak.color);
   const data = new Uint8ClampedArray(sz * sz * 4);
   for (let y = 2; y < sz - 1; y++) {
     const t = (y - 2) / (sz - 4);          // 0 = apex, 1 = base
@@ -710,9 +719,9 @@ map.on('load', () => {
     const cx = sz / 2;
     for (let x = Math.ceil(cx - hw); x <= Math.floor(cx + hw); x++) {
       const i = (y * sz + x) * 4;
-      data[i]   = 255;   // R
-      data[i+1] = 140;   // G  → #ff8c00
-      data[i+2] = 0;     // B
+      data[i]   = peakR;
+      data[i+1] = peakG;
+      data[i+2] = peakB;
       data[i+3] = 230;   // A
     }
   }
@@ -760,7 +769,7 @@ map.on('load', () => {
       'symbol-sort-key': ['*', ['to-number', ['get', 'ele'], 0], -1],
     },
     paint: {
-      'text-color': '#ff8c00',
+      'text-color': VIEWER_STYLE.osm.peak.color,
       'text-halo-color': 'rgba(0,0,0,0.8)',
       'text-halo-width': 1.5,
     },
