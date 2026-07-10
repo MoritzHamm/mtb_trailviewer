@@ -65,8 +65,13 @@
   </div>
 
   <div class="toggle-row">
-    <label for="toggle-osm">OSM vectors</label>
-    <input type="checkbox" id="toggle-osm" checked>
+    <label for="toggle-osm-lines">OSM lines</label>
+    <input type="checkbox" id="toggle-osm-lines" checked>
+  </div>
+
+  <div class="toggle-row">
+    <label for="toggle-osm-areas">OSM areas</label>
+    <input type="checkbox" id="toggle-osm-areas">
   </div>
 
   <div class="toggle-row" id="vert-row" style="opacity:.4;pointer-events:none">
@@ -399,6 +404,11 @@ const map = new maplibregl.Map({
   center: [CENTER_LNG, CENTER_LAT],
   zoom: START_ZOOM,
   maxPitch: 85,
+  // Keep more zoom levels of already-fetched tiles resident (default 5) so
+  // coarser zooms loaded earlier (e.g. the full-Dalarna overview at load time)
+  // stick around as MapLibre's own fallback while panning into new areas,
+  // instead of being evicted and leaving nothing to show but the previous tile.
+  maxTileCacheZoomLevels: 12,
 });
 
 // ---------------------------------------------------------------------------
@@ -407,7 +417,7 @@ const map = new maplibregl.Map({
 const DEFAULTS = {
   azimuth: 315, altitude: 35, exaggeration: 6,
   terrain3d: false, vertEx: 15,
-  background: 'osm', osmVectors: true,
+  background: 'osm', osmLines: true, osmAreas: false,
 };
 
 function saveSetting(key, value) {
@@ -429,7 +439,8 @@ const exSlider   = document.getElementById('exaggeration');
 const vertSlider = document.getElementById('vert-ex');
 const toggle3d   = document.getElementById('toggle-3d');
 const bgSelect   = document.getElementById('bg-select');
-const toggleOsm   = document.getElementById('toggle-osm');
+const toggleOsmLines = document.getElementById('toggle-osm-lines');
+const toggleOsmAreas = document.getElementById('toggle-osm-areas');
 const azVal      = document.getElementById('az-val');
 const altVal     = document.getElementById('alt-val');
 const exVal      = document.getElementById('ex-val');
@@ -442,7 +453,8 @@ exSlider.value   = loadSetting('exaggeration');
 vertSlider.value = loadSetting('vertEx');
 toggle3d.checked    = loadSetting('terrain3d');
 bgSelect.value      = loadSetting('background');
-toggleOsm.checked   = loadSetting('osmVectors');
+toggleOsmLines.checked = loadSetting('osmLines');
+toggleOsmAreas.checked = loadSetting('osmAreas');
 
 // Sync display labels to restored values
 azVal.textContent  = azSlider.value + '°';
@@ -656,21 +668,32 @@ document.getElementById('bg-select').addEventListener('change', e => {
 });
 
 // ---------------------------------------------------------------------------
-// OSM vector toggle
+// OSM vector toggles — lines/points (trails, roads, waterways, buildings,
+// peaks, labels) vs. areas (forest/landuse/water fills, which visually fight
+// the LiDAR-based hillshade and are the ones worth turning off)
 // ---------------------------------------------------------------------------
-const OSM_LAYERS = [
-  'osm-landuse','osm-water','osm-buildings',
+const OSM_LINE_LAYERS = [
   'osm-road-casing','osm-road-fill','osm-track','osm-path',
   'osm-waterway','osm-railway','osm-power','osm-natural-lines',
-  'osm-peaks-tri','osm-peaks-label','osm-places',
+  'osm-buildings','osm-peaks-tri','osm-peaks-label','osm-places',
+];
+const OSM_AREA_LAYERS = [
+  'osm-landuse','osm-water',
 ];
 
-document.getElementById('toggle-osm').addEventListener('change', e => {
-  const vis = e.target.checked ? 'visible' : 'none';
-  OSM_LAYERS.forEach(id => {
-    try { map.setLayoutProperty(id, 'visibility', vis); } catch(_) {}
-  });
-  saveSetting('osmVectors', e.target.checked);
+function applyOsmVisibility(layers, visible) {
+  const vis = visible ? 'visible' : 'none';
+  layers.forEach(id => { try { map.setLayoutProperty(id, 'visibility', vis); } catch(_) {} });
+}
+
+toggleOsmLines.addEventListener('change', e => {
+  applyOsmVisibility(OSM_LINE_LAYERS, e.target.checked);
+  saveSetting('osmLines', e.target.checked);
+});
+
+toggleOsmAreas.addEventListener('change', e => {
+  applyOsmVisibility(OSM_AREA_LAYERS, e.target.checked);
+  saveSetting('osmAreas', e.target.checked);
 });
 
 // ---------------------------------------------------------------------------
@@ -711,17 +734,6 @@ map.on('load', () => {
   });
 
   // Name + elevation label — appears from Z12, below the icon
-  // Apply restored settings to the map now that style + layers are ready
-  updateHillshade();
-  applyAltitude();
-  applyBackground(loadSetting('background'));
-  const osmVis = loadSetting('osmVectors') ? 'visible' : 'none';
-  OSM_LAYERS.forEach(id => { try { map.setLayoutProperty(id, 'visibility', osmVis); } catch(_) {} });
-  if (loadSetting('terrain3d')) {
-    map.setTerrain({ source: 'terrain', exaggeration: parseInt(vertSlider.value) / 10 });
-    map.setPitch(50);
-  }
-
   map.addLayer({
     id: 'osm-peaks-label',
     type: 'symbol',
@@ -753,6 +765,17 @@ map.on('load', () => {
       'text-halo-width': 1.5,
     },
   });
+
+  // Apply restored settings to the map now that style + layers are ready
+  updateHillshade();
+  applyAltitude();
+  applyBackground(loadSetting('background'));
+  applyOsmVisibility(OSM_LINE_LAYERS, loadSetting('osmLines'));
+  applyOsmVisibility(OSM_AREA_LAYERS, loadSetting('osmAreas'));
+  if (loadSetting('terrain3d')) {
+    map.setTerrain({ source: 'terrain', exaggeration: parseInt(vertSlider.value) / 10 });
+    map.setPitch(50);
+  }
 });
 
 // Initial compass draw
