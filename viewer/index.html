@@ -7,6 +7,13 @@
   <script src="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.js"></script>
   <link   href="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.css" rel="stylesheet">
   <script src="https://unpkg.com/pmtiles@3.2.0/dist/pmtiles.js"></script>
+  <!-- Canvas 2D surfaces store pixels premultiplied by alpha internally, no
+       matter the compositing mode — any pixel with alpha=0 permanently loses
+       its RGB the instant it's drawn, which is fatal here since wetness is
+       packed into the alpha channel as plain data, not real transparency.
+       pako + UPNG.js decode PNG bytes directly, bypassing canvas entirely. -->
+  <script src="https://unpkg.com/pako@2.1.0/dist/pako.min.js"></script>
+  <script src="https://unpkg.com/upng-js@2.1.0/UPNG.js"></script>
   <script src="style-config.js"></script>
   <link href="style.css" rel="stylesheet">
 </head>
@@ -135,12 +142,10 @@ maplibregl.addProtocol('slope', async (params) => {
     const [z, x, y] = params.url.replace('slope://', '').split('/').map(Number);
     const tile = await terrainTiles.getZxy(z, x, y);
     if (!tile) throw new Error('not found');
-    const srcBitmap = await createImageBitmap(new Blob([tile.data]));
-
+    // Decode with UPNG (not canvas) — see the wetness/vegheight protocol
+    // below for why canvas-based decoding is unsafe for these tiles.
     const S = 256;
-    const srcCtx = new OffscreenCanvas(S, S).getContext('2d');
-    srcCtx.drawImage(srcBitmap, 0, 0);
-    const { data: src } = srcCtx.getImageData(0, 0, S, S);
+    const src = new Uint8Array(UPNG.toRGBA8(UPNG.decode(tile.data))[0]);
 
     // Metres per pixel at tile-centre latitude (Web Mercator)
     const n = Math.pow(2, z);
@@ -192,15 +197,14 @@ function makeChannelProtocol(channelIndex, colorLow, colorHigh) {
     try {
       const tile = await overlayTiles.getZxy(z, x, y);
       if (!tile) throw new Error('not found');
-      // premultiplyAlpha:'none' — we're reading wetness out of the alpha
-      // channel as plain data, not as real transparency, so it must survive
-      // decode untouched.
-      const srcBitmap = await createImageBitmap(new Blob([tile.data]), { premultiplyAlpha: 'none' });
-
+      // Canvas 2D surfaces store pixels premultiplied by alpha internally, no
+      // matter the compositing mode — any pixel with A=0 (bone-dry ground,
+      // very common) permanently loses its R/G/B the instant it's drawn,
+      // since wetness lives in the alpha channel as plain data, not real
+      // transparency. UPNG decodes the PNG bytes directly, bypassing canvas
+      // (and its premultiplication) entirely.
       const S = 256;
-      const srcCtx = new OffscreenCanvas(S, S).getContext('2d');
-      srcCtx.drawImage(srcBitmap, 0, 0);
-      const { data: src } = srcCtx.getImageData(0, 0, S, S);
+      const src = new Uint8Array(UPNG.toRGBA8(UPNG.decode(tile.data))[0]);
 
       const out = new ImageData(S, S);
       const dst = out.data;
@@ -651,6 +655,19 @@ map.on('zoom', () => {
 
 map.on('mouseleave', () => {
   status.textContent = zoomStatus();
+});
+
+// Click anywhere on the map to copy that point's coordinates (lat, lng) —
+// handy for reporting back a specific spot (e.g. a data-coverage gap).
+let copyStatusTimer = null;
+map.on('click', e => {
+  const { lng, lat } = e.lngLat;
+  const text = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+  clearTimeout(copyStatusTimer);
+  navigator.clipboard.writeText(text)
+    .then(() => { status.textContent = `Copied: ${text}`; })
+    .catch(() => { status.textContent = `Copy failed — coords: ${text}`; });
+  copyStatusTimer = setTimeout(() => { status.textContent = zoomStatus(); }, 1800);
 });
 
 // ---------------------------------------------------------------------------
