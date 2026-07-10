@@ -423,6 +423,12 @@ const map = new maplibregl.Map({
   maxTileCacheZoomLevels: 12,
 });
 
+// Compass button — points opposite the map's current bearing (i.e. shows
+// which way is "up" relative to true north) and resets bearing/pitch to
+// north-up on click. Zoom buttons omitted; the sidebar/scroll already cover
+// zoom, no need for a second control.
+map.addControl(new maplibregl.NavigationControl({ showZoom: false, showCompass: true, visualizePitch: true }), 'bottom-right');
+
 // ---------------------------------------------------------------------------
 // Settings persistence
 // ---------------------------------------------------------------------------
@@ -486,10 +492,13 @@ vertVal.textContent = (parseInt(vertSlider.value) / 10).toFixed(1) + '×';
 
 function applyAltitude() {
   const t = parseInt(altSlider.value) / 85;
+  const ar = VIEWER_STYLE.hillshade.altitudeResponse;
+  const shadowL    = ar.shadowLightMin    + t * (ar.shadowLightMax    - ar.shadowLightMin);
+  const highlightL = ar.highlightLightMin + t * (ar.highlightLightMax - ar.highlightLightMin);
   map.setPaintProperty('hillshade', 'hillshade-shadow-color',
-    `hsl(240, 15%, ${Math.round(20 + t * 30)}%)`);
+    `hsl(${ar.shadowHue}, ${ar.shadowSat}%, ${Math.round(shadowL)}%)`);
   map.setPaintProperty('hillshade', 'hillshade-highlight-color',
-    `hsl(45, 30%, ${Math.round(95 + t * 4)}%)`);
+    `hsl(${ar.highlightHue}, ${ar.highlightSat}%, ${Math.round(highlightL)}%)`);
 }
 
 function updateHillshade() {

@@ -18,6 +18,17 @@ const VIEWER_STYLE = {
     exaggeration: 0.6,
     shadowColor: '#2a2a3a',
     highlightColor: '#fffbe8',
+
+    // applyAltitude() maps the altitude slider (0=low sun, 1=high sun) to
+    // these HSL lightness ranges. Both need to be wide: a narrow band near
+    // white/black is imperceptible, which is why sun-facing slopes used to
+    // blow out to white at every altitude (highlight lightness was pinned to
+    // 95-99% regardless of the slider) while shadows never got dark enough
+    // to balance it out.
+    altitudeResponse: {
+      shadowHue: 240, shadowSat: 15, shadowLightMin: 8,  shadowLightMax: 40,
+      highlightHue: 45, highlightSat: 30, highlightLightMin: 55, highlightLightMax: 90,
+    },
   },
 
   // Slope color ramp, anchored in degrees (what's actually computed from the
