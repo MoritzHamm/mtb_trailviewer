@@ -256,6 +256,18 @@ function loadSetting(key) {
   } catch(e) { return DEFAULTS[key]; }
 }
 
+// Shared by applyAltitude() below.
+function hillshadeShadowHighlight(altitudeDeg) {
+  const t = altitudeDeg / 85;
+  const ar = VIEWER_STYLE.hillshade.altitudeResponse;
+  const shadowL    = ar.shadowLightMin    + t * (ar.shadowLightMax    - ar.shadowLightMin);
+  const highlightL = ar.highlightLightMin + t * (ar.highlightLightMax - ar.highlightLightMin);
+  return {
+    shadowColor:    `hsl(${ar.shadowHue}, ${ar.shadowSat}%, ${Math.round(shadowL)}%)`,
+    highlightColor: `hsl(${ar.highlightHue}, ${ar.highlightSat}%, ${Math.round(highlightL)}%)`,
+  };
+}
+
 const map = new maplibregl.Map({
   container: 'map',
   style: {
@@ -453,6 +465,20 @@ const map = new maplibregl.Map({
 // zoom, no need for a second control.
 map.addControl(new maplibregl.NavigationControl({ showZoom: false, showCompass: true, visualizePitch: true }), 'bottom-right');
 
+// Apply saved settings (background choice, OSM line/area visibility, sun
+// angle) to the style right after it's parsed — 'style.load' fires as soon as
+// layers/sources are registered, well before 'load' (which waits for the
+// initial viewport's tiles to actually render, possibly a while at a broad
+// zoomed-out view). The style itself stays a plain declarative default; this
+// loop is the one place user state gets applied to it, uniformly, afterward.
+map.on('style.load', () => {
+  updateHillshade();
+  applyAltitude();
+  applyBackground(loadSetting('background'));
+  applyOsmVisibility(OSM_LINE_LAYERS, loadSetting('osmLines'));
+  applyOsmVisibility(OSM_AREA_LAYERS, loadSetting('osmAreas'));
+});
+
 // Persist the view (center/zoom/bearing/pitch) across reloads — saved on
 // moveend so it's one write per gesture, not per animation frame.
 map.on('moveend', () => {
@@ -507,14 +533,9 @@ vertVal.textContent = (parseInt(vertSlider.value) / 10).toFixed(1) + '×';
 }
 
 function applyAltitude() {
-  const t = parseInt(altSlider.value) / 85;
-  const ar = VIEWER_STYLE.hillshade.altitudeResponse;
-  const shadowL    = ar.shadowLightMin    + t * (ar.shadowLightMax    - ar.shadowLightMin);
-  const highlightL = ar.highlightLightMin + t * (ar.highlightLightMax - ar.highlightLightMin);
-  map.setPaintProperty('hillshade', 'hillshade-shadow-color',
-    `hsl(${ar.shadowHue}, ${ar.shadowSat}%, ${Math.round(shadowL)}%)`);
-  map.setPaintProperty('hillshade', 'hillshade-highlight-color',
-    `hsl(${ar.highlightHue}, ${ar.highlightSat}%, ${Math.round(highlightL)}%)`);
+  const colors = hillshadeShadowHighlight(parseInt(altSlider.value));
+  map.setPaintProperty('hillshade', 'hillshade-shadow-color', colors.shadowColor);
+  map.setPaintProperty('hillshade', 'hillshade-highlight-color', colors.highlightColor);
 }
 
 function updateHillshade() {
@@ -717,6 +738,13 @@ map.on('click', e => {
     .addTo(map);
 });
 
+// Pointer cursor over the same clickable line features, so it's obvious
+// what's selectable and easier to aim at a thin line precisely.
+CLICKABLE_LINE_LAYERS.forEach(id => {
+  map.on('mouseenter', id, () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', id, () => { map.getCanvas().style.cursor = ''; });
+});
+
 // ---------------------------------------------------------------------------
 // Background selector
 // ---------------------------------------------------------------------------
@@ -839,12 +867,10 @@ map.on('load', () => {
     },
   });
 
-  // Apply restored settings to the map now that style + layers are ready
-  updateHillshade();
-  applyAltitude();
-  applyBackground(loadSetting('background'));
+  // The peak layers just added didn't exist yet at 'style.load', so they
+  // missed that visibility pass — apply it once more now that they're here.
   applyOsmVisibility(OSM_LINE_LAYERS, loadSetting('osmLines'));
-  applyOsmVisibility(OSM_AREA_LAYERS, loadSetting('osmAreas'));
+
   if (loadSetting('terrain3d')) {
     map.setTerrain({ source: 'terrain', exaggeration: parseInt(vertSlider.value) / 10 });
     map.setPitch(50);
