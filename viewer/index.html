@@ -96,9 +96,15 @@
 // ---------------------------------------------------------------------------
 // Map init
 // ---------------------------------------------------------------------------
-// Single source of truth for tile locations — update these for deployment
-const TILE_BASE   = 'http://localhost:8080/tiles';
-const GLYPHS_BASE = 'http://localhost:8080/fonts';
+// Single source of truth for tile locations. Self-detecting rather than a
+// manual edit-before-deploy: in production this is served from the same R2
+// custom domain as the tiles themselves (same-origin — required for
+// pmtiles.js's fetches to carry the Cloudflare Access session cookie, since
+// it sets no explicit `credentials` option and so defaults to 'same-origin'),
+// so a relative path is both correct and never needs the domain name in source.
+const IS_LOCAL     = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+const TILE_BASE    = IS_LOCAL ? 'http://localhost:8080/tiles' : '/tiles';
+const GLYPHS_BASE  = IS_LOCAL ? 'http://localhost:8080/fonts' : '/fonts';
 
 // Register PMTiles protocol so MapLibre can read .pmtiles files directly
 const pmtilesProtocol = new pmtiles.Protocol();
@@ -714,8 +720,11 @@ const CLICKABLE_LINE_LAYERS = [
 ];
 
 function featureLabel(props) {
-  return props.name || props.highway || props.waterway || props.railway
-      || props.power || props.natural || 'Unnamed way';
+  // mtb:name (→ mtb_name after tag-key sanitizing) is the community-assigned
+  // name for informal trails that don't have an official "name" — only used
+  // as a fallback when a real name tag isn't present.
+  return props.name || props.mtb_name || props.highway || props.waterway
+      || props.railway || props.power || props.natural || 'Unnamed way';
 }
 
 let featurePopup = null;
