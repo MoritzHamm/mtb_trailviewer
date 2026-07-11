@@ -53,6 +53,16 @@ PLACE_TYPES = {"city", "town", "village", "hamlet", "suburb", "locality",
                "island", "islet", "isolated_dwelling", "farm", "neighbourhood",
                "quarter", "borough"}
 
+# Route relations (type=route, route=<one of these>) that name/group the
+# individual way segments making up a trail. Most named trails — MTB or
+# otherwise — are split across many anonymous way segments; the relation is
+# often the only place the actual trail name lives. Broad on purpose (per
+# discussion: this only enriches the *name* of ways already being extracted,
+# it doesn't add new geometry, so there's no real downside to casting wide).
+# Order = tie-break priority when a way belongs to more than one route type.
+ROUTE_TYPE_PRIORITY = ["mtb", "bicycle", "ski", "hiking", "foot", "horse"]
+ROUTE_TYPES = set(ROUTE_TYPE_PRIORITY)
+
 
 def _sanitize(d: dict) -> dict:
     """Lowercase keys, replace : - space with _. Deduplicate with suffix."""
@@ -66,11 +76,37 @@ def _sanitize(d: dict) -> dict:
     return out
 
 
+class RouteRelationCollector(osmium.SimpleHandler):
+    """First pass: PBFs list relations after the ways they reference, so a
+    single streaming pass can't attach a route's name to its member ways as
+    it goes — the ways are already emitted by the time relation() would fire.
+    This builds way_id -> (route_type, name, relation_id) up front so the
+    second pass (OSMHandler.way, below) can just look it up."""
+    def __init__(self):
+        super().__init__()
+        self.way_route: dict[int, tuple[str, str, int]] = {}
+
+    def relation(self, r):
+        route = r.tags.get("route")
+        name = r.tags.get("name")
+        if route not in ROUTE_TYPES or not name:
+            return
+        priority = ROUTE_TYPE_PRIORITY.index(route)
+        for m in r.members:
+            if m.type != 'w':
+                continue
+            existing = self.way_route.get(m.ref)
+            if existing is None or priority < ROUTE_TYPE_PRIORITY.index(existing[0]):
+                self.way_route[m.ref] = (route, name, r.id)
+
+
 class OSMHandler(osmium.SimpleHandler):
-    def __init__(self, minlat: float, maxlat: float, minlon: float, maxlon: float):
+    def __init__(self, minlat: float, maxlat: float, minlon: float, maxlon: float,
+                 way_route: dict[int, tuple[str, str, int]] | None = None):
         super().__init__()
         self.minlat, self.maxlat = minlat, maxlat
         self.minlon, self.maxlon = minlon, maxlon
+        self.way_route = way_route or {}
 
         self.roads          : list[dict] = []
         self.tracks         : list[dict] = []
@@ -135,6 +171,13 @@ class OSMHandler(osmium.SimpleHandler):
         row = _sanitize(tags)
         row["osm_id"]   = w.id
         row["geometry"] = LineString(coords)
+
+        route_info = self.way_route.get(w.id)
+        if route_info:
+            route_type, route_name, route_relation_id = route_info
+            row["route_type"] = route_type
+            row["route_name"] = route_name
+            row["route_relation_id"] = route_relation_id
 
         if hw in ROAD_TYPES:
             self.roads.append(row)
@@ -216,7 +259,13 @@ def main() -> None:
     print(f"Streaming  : {args.pbf}")
     print()
 
-    h = OSMHandler(minlat, maxlat, minlon, maxlon)
+    print("Pass 1/2: collecting named route relations (mtb/bicycle/hiking/foot/horse/ski)")
+    rc = RouteRelationCollector()
+    rc.apply_file(args.pbf)
+    print(f"  {len(rc.way_route)} ways carry a route name")
+
+    print("Pass 2/2: extracting ways/nodes")
+    h = OSMHandler(minlat, maxlat, minlon, maxlon, way_route=rc.way_route)
     h.apply_file(args.pbf, locations=True)
 
     print(f"Writing layers → {out}/")

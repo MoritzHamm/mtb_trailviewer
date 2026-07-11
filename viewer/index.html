@@ -720,11 +720,12 @@ const CLICKABLE_LINE_LAYERS = [
 ];
 
 function featureLabel(props) {
-  // mtb:name (→ mtb_name after tag-key sanitizing) is the community-assigned
-  // name for informal trails that don't have an official "name" — only used
-  // as a fallback when a real name tag isn't present.
-  return props.name || props.mtb_name || props.highway || props.waterway
-      || props.railway || props.power || props.natural || 'Unnamed way';
+  // Priority: the way's own name > the route relation's name (many named
+  // trails are split into anonymous segments — the relation is often the
+  // only place the real name lives, see extract_osm.py's RouteRelationCollector)
+  // > mtb:name (mtb_name — informal per-segment community label) > tag fallbacks.
+  return props.name || props.route_name || props.mtb_name || props.highway
+      || props.waterway || props.railway || props.power || props.natural || 'Unnamed way';
 }
 
 let featurePopup = null;
@@ -735,10 +736,18 @@ map.on('click', e => {
 
   const f = features[0];
   const label = featureLabel(f.properties);
+  // Link to the route relation when this segment belongs to one — shows the
+  // whole trail, not just the clicked fragment — otherwise fall back to the way.
+  const relId = f.properties.route_relation_id;
   const osmId = f.properties.osm_id;
-  const linkHtml = osmId != null
-    ? `<a href="https://www.openstreetmap.org/way/${osmId}" target="_blank" rel="noopener">View on OpenStreetMap ↗</a>`
-    : '<em>no OSM id on this feature</em>';
+  let linkHtml;
+  if (relId != null) {
+    linkHtml = `<a href="https://www.openstreetmap.org/relation/${relId}" target="_blank" rel="noopener">View route on OpenStreetMap ↗</a>`;
+  } else if (osmId != null) {
+    linkHtml = `<a href="https://www.openstreetmap.org/way/${osmId}" target="_blank" rel="noopener">View on OpenStreetMap ↗</a>`;
+  } else {
+    linkHtml = '<em>no OSM id on this feature</em>';
+  }
 
   if (featurePopup) featurePopup.remove();
   featurePopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '240px' })
