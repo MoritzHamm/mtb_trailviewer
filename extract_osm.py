@@ -24,12 +24,12 @@ Usage:
 """
 
 import argparse
+import json
 from collections import defaultdict
 from pathlib import Path
 
 import osmium
-import geopandas as gpd
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, mapping
 from pyproj import Transformer
 
 PBF_DEFAULT  = "/mnt/g/Download/sweden-latest.osm.pbf"
@@ -196,12 +196,30 @@ class OSMHandler(osmium.SimpleHandler):
 
 
 def _write(features: list[dict], path: Path) -> None:
+    """Write a plain FeatureCollection, one file per layer.
+
+    Deliberately not geopandas.GeoDataFrame.to_file(): a GeoDataFrame unions
+    every row's keys into one column set, so every feature ends up carrying
+    every tag key that *any* feature in the layer happens to have — for
+    paths.geojson that was 250 properties per feature with only ~5 ever
+    non-null. tippecanoe then has to parse and index that padding for every
+    single feature. Building the FeatureCollection by hand keeps each
+    feature's properties to what that OSM element actually has.
+    """
     if not features:
         print(f"  {path.name}: 0 features — skipped")
         return
-    gdf = gpd.GeoDataFrame(features, crs="EPSG:4326")
-    gdf.to_file(path, driver="GeoJSON")
-    print(f"  {path.name}: {len(gdf)}")
+    out_features = []
+    for row in features:
+        props = {k: v for k, v in row.items() if k != "geometry" and v is not None}
+        out_features.append({
+            "type": "Feature",
+            "geometry": mapping(row["geometry"]),
+            "properties": props,
+        })
+    with open(path, "w") as f:
+        json.dump({"type": "FeatureCollection", "features": out_features}, f)
+    print(f"  {path.name}: {len(out_features)}")
 
 
 def _fill_peak_elevations(peaks: list[dict], dtm_vrt: Path) -> None:
