@@ -694,11 +694,54 @@ function zoomStatus() {
   return `Z${z.toFixed(1)}  (terrain tile Z${terrainZ})`;
 }
 
+// Real elevation readout, read directly from terrain.pmtiles bytes rather
+// than MapLibre's queryTerrainElevation() — that function samples whatever
+// zoom-level DEM tile the current 3D mesh happens to have loaded for the
+// active view (a documented bug: maplibre/maplibre-gl-js#6701), not
+// necessarily our best available z17 data, and `exaggerated: false` does not
+// actually suppress the vertical-scale multiplier either. Confirmed on a
+// known point (Bondberget, 299m): queryTerrainElevation gave 0m at Z22 and a
+// scale-dependent 70-540m at Z12, nowhere near correct. Sampling the tile
+// ourselves (same trusted decode path as the slope shader) sidesteps both bugs.
+const ELEVATION_ZOOM = 17;   // terrain source's actual maxzoom — always use the best data, independent of camera zoom
+let elevTileCache = null;    // { key: 'z/x/y', data: Uint8Array } — avoids redecoding on every mousemove within the same tile
+
+async function sampleElevation(lng, lat) {
+  const n = Math.pow(2, ELEVATION_ZOOM);
+  const xFrac = (lng + 180) / 360 * n;
+  const latRad = lat * Math.PI / 180;
+  const yFrac = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
+  const tx = Math.floor(xFrac), ty = Math.floor(yFrac);
+  const key = `${tx}/${ty}`;
+
+  let data;
+  if (elevTileCache && elevTileCache.key === key) {
+    data = elevTileCache.data;
+  } else {
+    const tile = await terrainTiles.getZxy(ELEVATION_ZOOM, tx, ty);
+    if (!tile) return null;
+    data = new Uint8Array(UPNG.toRGBA8(UPNG.decode(tile.data))[0]);
+    elevTileCache = { key, data };
+  }
+
+  const S = 256;
+  const px = Math.min(S - 1, Math.floor((xFrac - tx) * S));
+  const py = Math.min(S - 1, Math.floor((yFrac - ty) * S));
+  const i = (py * S + px) * 4;
+  return -10000 + (data[i] * 65536 + data[i + 1] * 256 + data[i + 2]) * 0.1;
+}
+
+let elevRequestId = 0;
 map.on('mousemove', e => {
   const { lng, lat } = e.lngLat;
-  const elev = map.queryTerrainElevation(e.lngLat, { exaggerated: false });
-  const elevStr = elev !== null ? ` · ${Math.round(elev)} m` : '';
-  status.textContent = `${zoomStatus()}  ·  ${lat.toFixed(5)}°N  ${lng.toFixed(5)}°E${elevStr}`;
+  status.textContent = `${zoomStatus()}  ·  ${lat.toFixed(5)}°N  ${lng.toFixed(5)}°E`;
+
+  const myRequest = ++elevRequestId;
+  sampleElevation(lng, lat).then(elev => {
+    if (myRequest !== elevRequestId) return;   // a newer mousemove fired first — drop this stale result
+    const elevStr = elev !== null ? ` · ${Math.round(elev)} m` : '';
+    status.textContent = `${zoomStatus()}  ·  ${lat.toFixed(5)}°N  ${lng.toFixed(5)}°E${elevStr}`;
+  }).catch(() => {});
 });
 
 map.on('zoom', () => {
