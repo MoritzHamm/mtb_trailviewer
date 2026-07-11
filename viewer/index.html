@@ -234,6 +234,28 @@ const CENTER_LNG = 14.445;   // full Dalarna region
 const CENTER_LAT = 61.005;
 const START_ZOOM = 8;
 
+// ---------------------------------------------------------------------------
+// Settings persistence — defined before the map so its constructor can
+// restore the last view (center/zoom/bearing/pitch) on load.
+// ---------------------------------------------------------------------------
+const DEFAULTS = {
+  azimuth: 315, altitude: 35, exaggeration: 6,
+  terrain3d: false, vertEx: 15,
+  background: 'osm', osmLines: true, osmAreas: false,
+  viewLng: CENTER_LNG, viewLat: CENTER_LAT, viewZoom: START_ZOOM,
+  viewBearing: 0, viewPitch: 0,
+};
+
+function saveSetting(key, value) {
+  try { localStorage.setItem('tv_' + key, JSON.stringify(value)); } catch(e) {}
+}
+function loadSetting(key) {
+  try {
+    const v = localStorage.getItem('tv_' + key);
+    return v !== null ? JSON.parse(v) : DEFAULTS[key];
+  } catch(e) { return DEFAULTS[key]; }
+}
+
 const map = new maplibregl.Map({
   container: 'map',
   style: {
@@ -413,8 +435,10 @@ const map = new maplibregl.Map({
       },
     ],
   },
-  center: [CENTER_LNG, CENTER_LAT],
-  zoom: START_ZOOM,
+  center: [loadSetting('viewLng'), loadSetting('viewLat')],
+  zoom: loadSetting('viewZoom'),
+  bearing: loadSetting('viewBearing'),
+  pitch: loadSetting('viewPitch'),
   maxPitch: 85,
   // Keep more zoom levels of already-fetched tiles resident (default 5) so
   // coarser zooms loaded earlier (e.g. the full-Dalarna overview at load time)
@@ -429,24 +453,16 @@ const map = new maplibregl.Map({
 // zoom, no need for a second control.
 map.addControl(new maplibregl.NavigationControl({ showZoom: false, showCompass: true, visualizePitch: true }), 'bottom-right');
 
-// ---------------------------------------------------------------------------
-// Settings persistence
-// ---------------------------------------------------------------------------
-const DEFAULTS = {
-  azimuth: 315, altitude: 35, exaggeration: 6,
-  terrain3d: false, vertEx: 15,
-  background: 'osm', osmLines: true, osmAreas: false,
-};
-
-function saveSetting(key, value) {
-  try { localStorage.setItem('tv_' + key, JSON.stringify(value)); } catch(e) {}
-}
-function loadSetting(key) {
-  try {
-    const v = localStorage.getItem('tv_' + key);
-    return v !== null ? JSON.parse(v) : DEFAULTS[key];
-  } catch(e) { return DEFAULTS[key]; }
-}
+// Persist the view (center/zoom/bearing/pitch) across reloads — saved on
+// moveend so it's one write per gesture, not per animation frame.
+map.on('moveend', () => {
+  const c = map.getCenter();
+  saveSetting('viewLng', c.lng);
+  saveSetting('viewLat', c.lat);
+  saveSetting('viewZoom', map.getZoom());
+  saveSetting('viewBearing', map.getBearing());
+  saveSetting('viewPitch', map.getPitch());
+});
 
 // ---------------------------------------------------------------------------
 // Controls → map
@@ -666,17 +682,39 @@ map.on('mouseleave', () => {
   status.textContent = zoomStatus();
 });
 
-// Click anywhere on the map to copy that point's coordinates (lat, lng) —
-// handy for reporting back a specific spot (e.g. a data-coverage gap).
-let copyStatusTimer = null;
+// Click a line feature (trail, road, waterway, ...) to select it and show a
+// popup linking back to the source OSM way. Point features (peaks, places)
+// are deliberately excluded for now — no click use for those yet.
+// 'osm-road-casing' is skipped: it's just the wider outline of 'osm-road-fill'
+// on the same source-layer, querying both would return the same way twice.
+const CLICKABLE_LINE_LAYERS = [
+  'osm-road-fill', 'osm-track', 'osm-path',
+  'osm-waterway', 'osm-railway', 'osm-power', 'osm-natural-lines',
+];
+
+function featureLabel(props) {
+  return props.name || props.highway || props.waterway || props.railway
+      || props.power || props.natural || 'Unnamed way';
+}
+
+let featurePopup = null;
 map.on('click', e => {
-  const { lng, lat } = e.lngLat;
-  const text = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-  clearTimeout(copyStatusTimer);
-  navigator.clipboard.writeText(text)
-    .then(() => { status.textContent = `Copied: ${text}`; })
-    .catch(() => { status.textContent = `Copy failed — coords: ${text}`; });
-  copyStatusTimer = setTimeout(() => { status.textContent = zoomStatus(); }, 1800);
+  const layers = CLICKABLE_LINE_LAYERS.filter(id => map.getLayer(id));
+  const features = map.queryRenderedFeatures(e.point, { layers });
+  if (!features.length) return;
+
+  const f = features[0];
+  const label = featureLabel(f.properties);
+  const osmId = f.properties.osm_id;
+  const linkHtml = osmId != null
+    ? `<a href="https://www.openstreetmap.org/way/${osmId}" target="_blank" rel="noopener">View on OpenStreetMap ↗</a>`
+    : '<em>no OSM id on this feature</em>';
+
+  if (featurePopup) featurePopup.remove();
+  featurePopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '240px' })
+    .setLngLat(e.lngLat)
+    .setHTML(`<strong>${label}</strong><br>${linkHtml}`)
+    .addTo(map);
 });
 
 // ---------------------------------------------------------------------------
