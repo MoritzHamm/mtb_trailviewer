@@ -15,6 +15,7 @@ mtb-editor/tiles/
 
 # Local secrets (e.g. CF Access service token for the tile proxy)
 mtb-editor/.env
+mtb-editor/env.bat
 
 # Python
 __pycache__/
