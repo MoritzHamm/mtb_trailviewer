@@ -17,7 +17,8 @@
 #                                       .pmtiles). Few, larger files — a slower
 #                                       mount is fine, and it keeps this off the
 #                                       small local disk.
-# The viewer/tiles directory is populated at the end.
+# MTB_EDITOR_DIR (../mtb-editor, a sibling since the foundation/mtb-editor/
+# game-editor reorg) gets its tiles/ directory populated at the end.
 #
 # Steps:
 #   1. OSM extraction        → $WORK_SLOW/osm_layers/
@@ -25,13 +26,13 @@
 #   3. RGBA overlay tiles    → $WORK_FAST/overlay-tiles/
 #   4. Overlay PMTiles       → $WORK_SLOW/overlay.pmtiles
 #   5. Terrain RGB tiles     → $WORK_FAST/terrain-tiles/  → $WORK_SLOW/terrain.pmtiles
-#   6. Copy tiles to viewer
+#   6. Copy tiles to mtb-editor/tiles/
 #
 # Usage:
 #   bash build_pipeline.sh [--skip-osm] [--skip-overlay] [--skip-terrain]
 #   bash build_pipeline.sh --skip-osm                      # overlay + terrain only
 #   bash build_pipeline.sh --skip-terrain --skip-overlay   # OSM/vectors only
-#   bash build_pipeline.sh --work-fast=/path --work-slow=/path
+#   bash build_pipeline.sh --work-fast=/path --work-slow=/path --mtb-editor-dir=/path
 # =============================================================================
 set -euo pipefail
 
@@ -43,7 +44,8 @@ log() { printf '[%(%H:%M:%S)T] %s\n' -1 "$1"; }
 DTM_VRT="$HOME/lidar-output/dtm/merged_dtm.vrt"
 CHM_VRT="$HOME/lidar-output/dtm/merged_chm.vrt"
 WETNESS="/mnt/g/SLU/SLUMarkfuktighetskarta/SLUMarkfuktighetskarta.tif"
-OSM_PBF="/home/mo/lidar/osm/sweden-latest.osm.pbf"
+LIDAR_DIR="$(cd "$(dirname "$0")" && pwd)"
+OSM_PBF="$LIDAR_DIR/osm/sweden-latest.osm.pbf"
 
 # -----------------------------------------------------------------------------
 # Flags (parsed before paths so --work= and --bbox= take effect)
@@ -55,6 +57,7 @@ MAX_ZOOM=17
 BBOX="342500 6630000 600000 6900000"   # full Dalarna
 WORK_FAST="$HOME/lidar-output"         # tile pyramids — needs fast local disk
 WORK_SLOW="/mnt/g/lidar-output"        # everything else — fine on a slower mount
+MTB_EDITOR_DIR="$LIDAR_DIR/../mtb-editor"   # sibling dir since the reorg (was a child: viewer/)
 DTM_OVERRIDE=""   # override DTM source (single tile instead of merged VRT)
 CHM_OVERRIDE=""   # override CHM source
 WETNESS_OVERRIDE="" # override wetness source
@@ -68,6 +71,7 @@ for arg in "$@"; do
     --bbox=*)        BBOX="${arg#--bbox=}" ;;
     --work-fast=*)   WORK_FAST="${arg#--work-fast=}" ;;
     --work-slow=*)   WORK_SLOW="${arg#--work-slow=}" ;;
+    --mtb-editor-dir=*) MTB_EDITOR_DIR="${arg#--mtb-editor-dir=}" ;;
     --dtm=*)         DTM_OVERRIDE="${arg#--dtm=}" ;;
     --chm=*)         CHM_OVERRIDE="${arg#--chm=}" ;;
     --wetness=*)     WETNESS_OVERRIDE="${arg#--wetness=}" ;;
@@ -91,8 +95,7 @@ OVERLAY_PMTILES="$WORK_SLOW/overlay.pmtiles"
 TERRAIN_TILES="$WORK_FAST/terrain-tiles"
 TERRAIN_PMTILES="$WORK_SLOW/terrain.pmtiles"
 
-LIDAR_DIR="$(cd "$(dirname "$0")" && pwd)"
-VIEWER="$LIDAR_DIR/viewer/tiles"
+VIEWER="$MTB_EDITOR_DIR/tiles"
 
 source ~/lidar-env/bin/activate
 
@@ -193,9 +196,9 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 6: Copy to viewer
+# Step 6: Copy to mtb-editor/tiles/
 # -----------------------------------------------------------------------------
-log "Step 6: Copying to viewer"
+log "Step 6: Copying to mtb-editor"
 mkdir -p "$VIEWER"
 
 copy_if_exists() {

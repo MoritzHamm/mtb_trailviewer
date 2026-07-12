@@ -5,13 +5,13 @@
 # Generated raster outputs
 *.tif
 *.tiff
-dtm/
+foundation/dtm/
 
 # OSM downloads
-osm/
+foundation/osm/
 
 # Generated tile pyramid
-viewer/tiles/
+mtb-editor/tiles/
 
 # Python
 __pycache__/

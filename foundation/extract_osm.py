@@ -261,7 +261,7 @@ def main() -> None:
                         help="Bounding box in SWEREF99TM / EPSG:3006")
     parser.add_argument("--pbf", default=PBF_DEFAULT)
     parser.add_argument("--out", default=str(OUT_DEFAULT))
-    parser.add_argument("--dtm", default="/home/mo/lidar/dtm/merged.vrt",
+    parser.add_argument("--dtm", default=str(Path.home() / "lidar-output/dtm/merged_dtm.vrt"),
                         help="DTM VRT for filling missing peak elevations")
     args = parser.parse_args()
 

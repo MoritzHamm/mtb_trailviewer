@@ -5,7 +5,7 @@ Required for serving PMTiles files (which use byte-range fetching).
 
 Usage:
     python serve.py [port] [directory]
-    python serve.py 8080 viewer          # default
+    python serve.py 8080                 # default: serves this script's own directory
 """
 import os
 import sys
@@ -74,7 +74,7 @@ class RangeHTTPRequestHandler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     port      = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
-    directory = sys.argv[2]      if len(sys.argv) > 2 else str(Path(__file__).parent / "viewer")
+    directory = sys.argv[2]      if len(sys.argv) > 2 else str(Path(__file__).parent)
 
     os.chdir(directory)
     print(f"Serving {directory}/ on http://localhost:{port}")

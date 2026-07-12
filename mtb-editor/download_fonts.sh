@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Download OpenMapTiles PBF fonts for self-hosting in the viewer.
-# Fonts land in viewer/fonts/{Font Name}/{range}.pbf
+# Fonts land in fonts/{Font Name}/{range}.pbf
 set -euo pipefail
 
-FONTS_DIR="/home/mo/lidar/viewer/fonts"
+FONTS_DIR="$(cd "$(dirname "$0")" && pwd)/fonts"
 TMP=$(mktemp -d)
 
 echo "Downloading OpenMapTiles fonts zip …"
