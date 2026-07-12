@@ -841,9 +841,19 @@ map.on('click', e => {
     linkHtml = '<em>no OSM id on this feature</em>';
   }
 
+  // Vector tiles clip long ways at tile boundaries, so a single OSM way can
+  // render as several separate features (same osm_id, different clipped
+  // geometry) — highlight every currently-rendered fragment of this way, not
+  // just the one under the cursor, or the glow looks like several unrelated
+  // segments instead of one trail. Querying with no geometry arg searches the
+  // whole current viewport rather than a single point/box.
+  const fragments = osmId != null
+    ? map.queryRenderedFeatures(undefined, { layers }).filter(ff => ff.properties.osm_id === osmId)
+    : [f];
+
   map.getSource('selected-feature').setData({
     type: 'FeatureCollection',
-    features: [{ type: 'Feature', geometry: f.geometry, properties: {} }],
+    features: fragments.map(ff => ({ type: 'Feature', geometry: ff.geometry, properties: {} })),
   });
 
   if (featurePopup) featurePopup.remove();
