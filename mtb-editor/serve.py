@@ -50,6 +50,9 @@ class RangeHTTPRequestHandler(SimpleHTTPRequestHandler):
         headers = {
             "CF-Access-Client-Id": CF_CLIENT_ID,
             "CF-Access-Client-Secret": CF_CLIENT_SECRET,
+            # Cloudflare's bot protection blocks the default "Python-urllib/x.y"
+            # User-Agent (error 1010) even with valid Access credentials.
+            "User-Agent": "Mozilla/5.0 (compatible; dalarna-mtb-local-proxy/1.0)",
         }
         range_header = self.headers.get("Range")
         if range_header:
