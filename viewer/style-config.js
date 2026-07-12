@@ -50,6 +50,15 @@ const VIEWER_STYLE = {
   wetness:   { colorLow: [168, 138, 91],  colorHigh: [27, 79, 114] },  // dry tan → wet blue
   vegheight: { colorLow: [194, 178, 128], colorHigh: [18, 63, 18] },   // bare tan → dark canopy green
 
+  // Selected-feature highlight (click a trail/road/etc.) — bright gold glow,
+  // similar to OSM's own iD editor selection style. Two stacked line layers:
+  // a wide blurred outer glow + a narrower, crisper core on top of it.
+  selection: {
+    color: '#fff700',
+    glowWidth: 16, glowOpacity: 0.35, glowBlur: 3,
+    coreWidth: 5,  coreOpacity: 0.9,  coreBlur: 0.5,
+  },
+
   coverage: {
     maskColor: '#888888', maskOpacity: 0.35,
     borderColor: '#ff7733',

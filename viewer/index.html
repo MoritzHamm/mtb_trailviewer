@@ -333,6 +333,10 @@ const map = new maplibregl.Map({
         url: `pmtiles://${TILE_BASE}/dalarna.pmtiles`,
         attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
       },
+      'selected-feature': {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      },
     },
     layers: [
       { id: 'bg-solid', type: 'background', paint: { 'background-color': VIEWER_STYLE.background.solid } },
@@ -374,6 +378,28 @@ const map = new maplibregl.Map({
       // Buildings
       { id: 'osm-buildings', type: 'fill', source: 'osmvec', 'source-layer': 'buildings', minzoom: 14,
         paint: { 'fill-color': VIEWER_STYLE.osm.buildings.color, 'fill-opacity': VIEWER_STYLE.osm.buildings.opacity },
+      },
+      // Selected-feature highlight (click a line to select it) — wide blurred
+      // glow + a crisper core, sitting *below* the actual line layers so the
+      // real feature (its own color/width) stays fully visible on top, with
+      // the highlight showing only as a halo in the margin around it.
+      { id: 'selection-glow', type: 'line', source: 'selected-feature',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': VIEWER_STYLE.selection.color,
+          'line-width': VIEWER_STYLE.selection.glowWidth,
+          'line-opacity': VIEWER_STYLE.selection.glowOpacity,
+          'line-blur': VIEWER_STYLE.selection.glowBlur,
+        },
+      },
+      { id: 'selection-core', type: 'line', source: 'selected-feature',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': VIEWER_STYLE.selection.color,
+          'line-width': VIEWER_STYLE.selection.coreWidth,
+          'line-opacity': VIEWER_STYLE.selection.coreOpacity,
+          'line-blur': VIEWER_STYLE.selection.coreBlur,
+        },
       },
       // Motor roads — casing
       { id: 'osm-road-casing', type: 'line', source: 'osmvec', 'source-layer': 'roads', minzoom: 9,
@@ -771,11 +797,34 @@ function featureLabel(props) {
       || props.waterway || props.railway || props.power || props.natural || 'Unnamed way';
 }
 
+// Thin lines are hard to hit pixel-perfect (paths render as little as 0.5px
+// wide at low zoom) — query a small box around the click instead of the
+// exact point.
+const CLICK_HIT_TOLERANCE = 6;
+
+function clearSelection() {
+  const src = map.getSource('selected-feature');
+  if (src) src.setData({ type: 'FeatureCollection', features: [] });
+}
+
 let featurePopup = null;
 map.on('click', e => {
   const layers = CLICKABLE_LINE_LAYERS.filter(id => map.getLayer(id));
-  const features = map.queryRenderedFeatures(e.point, { layers });
-  if (!features.length) return;
+  const bbox = [
+    [e.point.x - CLICK_HIT_TOLERANCE, e.point.y - CLICK_HIT_TOLERANCE],
+    [e.point.x + CLICK_HIT_TOLERANCE, e.point.y + CLICK_HIT_TOLERANCE],
+  ];
+  const features = map.queryRenderedFeatures(bbox, { layers });
+
+  // Tear down any previous selection first — removing the old popup fires
+  // its 'close' handler (clearSelection), which must happen *before* we set
+  // the new highlight below, or it wipes out the selection we just made.
+  if (featurePopup) { featurePopup.remove(); featurePopup = null; }
+
+  if (!features.length) {
+    clearSelection();
+    return;
+  }
 
   const f = features[0];
   const label = featureLabel(f.properties);
@@ -792,11 +841,17 @@ map.on('click', e => {
     linkHtml = '<em>no OSM id on this feature</em>';
   }
 
+  map.getSource('selected-feature').setData({
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', geometry: f.geometry, properties: {} }],
+  });
+
   if (featurePopup) featurePopup.remove();
   featurePopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '240px' })
     .setLngLat(e.lngLat)
     .setHTML(`<strong>${label}</strong><br>${linkHtml}`)
     .addTo(map);
+  featurePopup.on('close', clearSelection);
 });
 
 // Pointer cursor over the same clickable line features, so it's obvious
