@@ -102,6 +102,11 @@
 // pmtiles.js's fetches to carry the Cloudflare Access session cookie, since
 // it sets no explicit `credentials` option and so defaults to 'same-origin'),
 // so a relative path is both correct and never needs the domain name in source.
+//
+// Locally, the browser always talks to localhost:8080 — serve.py transparently
+// proxies any /tiles or /fonts path that isn't present on disk to the real R2
+// domain (using a Cloudflare Access service token), so a laptop with no local
+// pmtiles files just works with no query params or origin-switching here.
 const IS_LOCAL     = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
 const TILE_BASE    = IS_LOCAL ? 'http://localhost:8080/tiles' : '/tiles';
 const GLYPHS_BASE  = IS_LOCAL ? 'http://localhost:8080/fonts' : '/fonts';
