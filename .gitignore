@@ -13,6 +13,9 @@ foundation/osm/
 # Generated tile pyramid
 mtb-editor/tiles/
 
+# Local secrets (e.g. CF Access service token for the tile proxy)
+mtb-editor/.env
+
 # Python
 __pycache__/
 *.pyc
