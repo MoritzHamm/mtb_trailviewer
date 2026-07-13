@@ -169,11 +169,10 @@ match intent):
 
 **Setup status:** project created, `0001_trails_and_history.sql` applied and RLS
 verified live (anon key gets `[]`/403; authenticated-only access confirmed for both
-tables and the `trail-images` bucket). `0002_created_by_defaults.sql` adds
-`default auth.uid()` to `created_by` on both tables plus a check constraint on
-`trail_history` preventing an authenticated user from setting someone else's id as
-author — **must be run** (SQL Editor) before the insert flow below will work, since the
-client code doesn't pass `created_by` explicitly and relies on that default.
+tables and the `trail-images` bucket). Migrations `0002`–`0004` (see below for what
+each does) must be run in order (SQL Editor) — `0002` in particular is required before
+any insert will work at all, since the client code doesn't pass `created_by` explicitly
+and relies on the default it adds.
 
 **Frontend — click-to-add-entry flow (built):** clicking a feature that qualifies as a
 trail (`getTrailIdentity()`, `index.html`) adds buttons to its popup when logged in:
@@ -182,27 +181,44 @@ history) "Show history" — hidden behind a "log in first" hint if not logged in
 "add" buttons open a modal (`#entry-form-wrap`) for a `status`/`comment`/`image` entry.
 On submit: `ensureTrailRow()` upserts the lazy `trails` row (keyed by the clicked
 feature's OSM identity, caching a display snapshot), then inserts into `trail_history`
-— `location` is set only for "at this point" entries, as an EWKT string
-`SRID=4326;POINT(lng lat)` (Postgres casts this to `geography` automatically on insert).
+— `location_id` is set only for "at this point" entries (see Locations below for how
+that id is resolved).
 
 **Point markers — "add another entry here" (built):** point-located entries render as
 clickable markers (`history-points` layer); clicking one shows its value and, if
-logged in, an "Add entry here" button that reuses the same `trail_id` and location for
-a follow-up entry (e.g. logging a second update on the same windfall) — this path skips
-`ensureTrailRow` entirely via `pendingEntry.trailId`, since there's no `trails` row
-to find-or-create when it's already known.
+logged in, an "Add entry here" button to log a follow-up at the same spot (e.g. a
+second update on the same windfall) — this path skips both `ensureTrailRow` and
+`find_or_create_location` (see below) entirely via `pendingEntry.trailId`/`locationId`,
+since there's no `trails`/`locations` row left to find-or-create when it's already
+known, and reusing the marker's own id (rather than re-resolving from lng/lat) means
+this can never accidentally attach to a *different* nearby location.
+
+**Locations — giving a point its own history (built, `supabase/migrations/
+0004_locations.sql`):** a `locations` table (id, `geog geography(Point,4326)`, label)
+gives point-located entries a stable identity, replacing an earlier design where each
+`trail_history` row carried its own disconnected point directly. Without that identity,
+every "add entry here" created a brand-new, unrelated marker at (nearly) the same spot
+instead of adding to that spot's history — there was no way to see "a tree fell here"
+followed later by "cleared" as one continuous story. `trail_history.location_id`
+references `locations(id)` (the old direct `location` column and its
+`location_geojson` computed-column function from migration 0003 were dropped in favor
+of this). `find_or_create_location(lng, lat, snap_meters=15)` — a Postgres function —
+snaps a *newly* placed point ("add entry at this point", starting fresh from a trail's
+popup) to an existing location within 15m if one exists, rather than always creating a
+new one; only used when a locationId isn't already known (i.e. not the "add entry
+here" path above, which always has one).
 
 **Reading geography columns back out (important, easy to get wrong again):**
 PostgREST returns PostGIS `geography` columns as raw **WKB hex text** by default, not
-GeoJSON — `r.location.coordinates` on a plain `.select('location')` silently gets
-nothing usable (this was a real bug caught before ever reaching a live insert: the
-point-marker code originally assumed GeoJSON and would have rendered zero markers).
-Fixed via a PostgREST "computed column" — `location_geojson(trail_history)` in
-`supabase/migrations/0003_location_geojson.sql`, a SQL function taking the table's row
-type as its sole argument, which PostgREST exposes as a selectable field
-(`.select('..., location_geojson')`) returning `ST_AsGeoJSON(location)::jsonb`. Applies
-anywhere a `geography`/`geometry` column needs to come back through supabase-js as
-usable coordinates — don't reintroduce a raw `.select('location')` expecting GeoJSON.
+GeoJSON — `r.somecol.coordinates` on a plain `.select('somecol')` silently gets nothing
+usable (this was a real bug caught before ever reaching a live insert: the original
+point-marker code assumed GeoJSON and would have rendered zero markers). Fixed via a
+PostgREST "computed column" — a SQL function taking the table's row type as its sole
+argument, which PostgREST exposes as a selectable field. `locations` has one named
+`geojson` (`.select('..., locations!inner(geojson)')`, returning
+`ST_AsGeoJSON(geog)::jsonb`). Applies anywhere a `geography`/`geometry` column needs to
+come back through supabase-js as usable coordinates — don't reintroduce a raw
+`.select('some_geography_column')` expecting GeoJSON.
 
 **Map display (built):** `trailStatusMap` (latest `status` per trail) recolors a
 `trail-status` overlay layer; `trailHistorySet`/`trailIdByKey` (built from the same
@@ -214,8 +230,16 @@ same technique as the pre-existing selection-highlight code (recomputed on `move
 and `sourcedata`). `'clear'` status (or no status at all) shows no overlay line, but a
 trail with only comments/images (no status, or a 'clear' one) still gets the "Show
 history" button via `trailHistorySet` — that's a separate check from the overlay color.
-`fetchTrailHistoryHtml()` renders a trail's full history as a scrollable list
-(newest-first) inside the popup on demand; images resolve to a signed URL per view.
+`fetchHistoryHtml(filterColumn, filterValue)` renders a trail's *or* location's full
+history as a scrollable list (newest-first), used by both the trail popup's "Show
+history" button (`'trail_id'`) and every point marker's popup, which always shows its
+full history rather than just the latest entry (`'location_id'`) — images resolve to a
+signed URL per view. Point markers (`history-points` layer) are deduplicated one per
+`location_id` (not one per entry) and colored by that location's *latest* entry —
+`status` entries reuse the trail overlay's clear/overgrown/blocked colors so a marker
+visibly changes once someone logs it resolved, rather than staying a generic
+"there's-history-here" color forever; `comment`/`image` entries with no status get
+their own neutral colors.
 
 **Known gaps / not built yet:**
 - No edit/delete for existing entries — append-only for now.
@@ -228,6 +252,9 @@ history" button via `trailHistorySet` — that's a separate check from the overl
 - No standalone "place a marker not tied to any trail" flow — every point-located entry
   today originates from a trail click ("add entry at this point"), so `trail_id` is
   always set in practice even though the schema allows it to be null.
+- `find_or_create_location`'s 15m snap radius is a guess, not tuned against real usage
+  — if entries meant to be separate keep merging (or ones meant to be the same keep
+  splitting), that's the number to revisit.
 
 ## Future work (not built yet)
 

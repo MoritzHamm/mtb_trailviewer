@@ -590,11 +590,25 @@ const map = new maplibregl.Map({
       { id: 'history-points', type: 'circle', source: 'history-points',
         paint: {
           'circle-radius': VIEWER_STYLE.historyPoint.radius,
-          'circle-color': ['match', ['get', 'entry_type'],
-            'status',  VIEWER_STYLE.historyPoint.status,
-            'comment', VIEWER_STYLE.historyPoint.comment,
-            'image',   VIEWER_STYLE.historyPoint.image,
-            '#999',
+          // Colored by the location's *latest* entry (see refreshTrailData) —
+          // a status entry gets the same clear/overgrown/blocked colors as the
+          // trail overlay, so e.g. a windfall reads as red until someone logs
+          // it 'clear', at which point it reads as resolved rather than staying
+          // a generic "there's history here" color forever.
+          'circle-color': ['case',
+            ['==', ['get', 'entry_type'], 'status'],
+            ['match', ['get', 'status'],
+              'clear',             VIEWER_STYLE.historyPoint.statusClear,
+              'overgrown',         VIEWER_STYLE.trailStatus.overgrown,
+              'partially_blocked', VIEWER_STYLE.trailStatus.partially_blocked,
+              'fully_blocked',     VIEWER_STYLE.trailStatus.fully_blocked,
+              '#999',
+            ],
+            ['match', ['get', 'entry_type'],
+              'comment', VIEWER_STYLE.historyPoint.comment,
+              'image',   VIEWER_STYLE.historyPoint.image,
+              '#999',
+            ],
           ],
           'circle-stroke-color': VIEWER_STYLE.historyPoint.strokeColor,
           'circle-stroke-width': VIEWER_STYLE.historyPoint.strokeWidth,
@@ -1051,7 +1065,7 @@ map.on('click', e => {
       container.textContent = 'Loading…';
       const trailId = trailIdByKey.get(historyKey);
       container.innerHTML = trailId
-        ? await fetchTrailHistoryHtml(trailId)
+        ? await fetchHistoryHtml('trail_id', trailId)
         : '<div class="history-empty">No history yet.</div>';
     });
   }
@@ -1084,14 +1098,17 @@ const entryCommentValue = document.getElementById('entry-comment-value');
 const entryImageValue  = document.getElementById('entry-image-value');
 const entryFormMessage = document.getElementById('entry-form-message');
 
-// { identity, props, label, location, clickPoint, trailId }. trailId is set
-// directly when adding to an already-known trail (e.g. from a history-point
-// marker's "Add entry here") — that path skips ensureTrailRow/identity/props
-// entirely, since there's no trails row left to find-or-create.
+// { identity, props, label, location, clickPoint, trailId, locationId }.
+// trailId is set directly when adding to an already-known trail (e.g. from a
+// history-point marker's "Add entry here") — that path skips
+// ensureTrailRow/identity/props entirely, since there's no trails row left to
+// find-or-create. Likewise locationId is set directly from that same marker
+// (its own location_id), skipping find_or_create_location — the marker's
+// history should never end up snapping to a *different* nearby location.
 let pendingEntry = null;
 
-function openEntryForm({ identity, props, label, location, clickPoint, trailId }) {
-  pendingEntry = { identity, props, label, location, clickPoint, trailId };
+function openEntryForm({ identity, props, label, location, clickPoint, trailId, locationId }) {
+  pendingEntry = { identity, props, label, location, clickPoint, trailId, locationId };
   entryFormTitle.textContent = location ? 'Add entry at this point' : 'Add entry to trail';
   entryFormContext.textContent = label;
   entryTypeSelect.value = 'status';
@@ -1151,12 +1168,28 @@ async function uploadEntryImage(file, trailId) {
 
 document.getElementById('entry-form-submit').addEventListener('click', async () => {
   if (!pendingEntry || !currentSession) return;
-  const { identity, props, location, clickPoint, trailId: knownTrailId } = pendingEntry;
+  const { identity, props, location, clickPoint,
+          trailId: knownTrailId, locationId: knownLocationId } = pendingEntry;
   const type = entryTypeSelect.value;
 
   entryFormMessage.textContent = 'Saving…';
   try {
-    const trailId = knownTrailId || await ensureTrailRow(identity, props, clickPoint);
+    const trailId = knownTrailId || (identity ? await ensureTrailRow(identity, props, clickPoint) : null);
+
+    // A brand-new point (starting fresh from a trail's popup) snaps to an
+    // existing nearby location if one's within range, rather than always
+    // creating a new one — see find_or_create_location in
+    // supabase/migrations/0004_locations.sql. A point added via an existing
+    // marker's "Add entry here" already has knownLocationId and skips this,
+    // so it can never end up attached to the wrong nearby location.
+    let locationId = knownLocationId || null;
+    if (!locationId && location) {
+      const { data: locId, error: locErr } = await sb.rpc('find_or_create_location', {
+        p_lng: location.lng, p_lat: location.lat,
+      });
+      if (locErr) throw locErr;
+      locationId = locId;
+    }
 
     let value;
     if (type === 'status') {
@@ -1168,12 +1201,12 @@ document.getElementById('entry-form-submit').addEventListener('click', async () 
     } else {
       const file = entryImageValue.files[0];
       if (!file) { entryFormMessage.textContent = 'Choose an image first.'; return; }
-      const path = await uploadEntryImage(file, trailId);
+      const path = await uploadEntryImage(file, trailId || locationId);
       value = { path, content_type: file.type, size_bytes: file.size };
     }
 
     const row = { trail_id: trailId, entry_type: type, value };
-    if (location) row.location = `SRID=4326;POINT(${location.lng} ${location.lat})`;
+    if (locationId) row.location_id = locationId;
 
     const { error } = await sb.from('trail_history').insert(row);
     if (error) throw error;
@@ -1237,37 +1270,52 @@ async function refreshTrailData() {
   }
   updateTrailStatusOverlay();
 
-  // Point-located entries of any type — plotted as markers regardless of
-  // whether they're also linked to a trail. location_geojson is a computed
-  // column (see supabase/migrations/0003_location_geojson.sql) — the raw
-  // `location` column comes back as WKB hex text via the REST API by default,
-  // not GeoJSON, so reading it directly wouldn't give usable coordinates.
+  // One marker per *location*, not per entry — a location can accumulate many
+  // history entries over time (e.g. "tree fell here" then later "cleared"),
+  // and all of them belong to the same marker/history list rather than each
+  // becoming its own disconnected dot (see supabase/migrations/0004_locations.sql).
+  // `geojson` is a computed column on locations (same reasoning as trail_history's
+  // now-removed location_geojson in 0003): geography columns come back as WKB hex
+  // text via the REST API by default, not GeoJSON.
+  // Rows are ordered newest-first, so the first row seen per location_id is that
+  // location's latest entry — used to style/color the marker without a second query.
   const { data: pointRows, error: pointErr } = await sb
     .from('trail_history')
-    .select('id, entry_type, value, created_at, location_geojson, trail_id')
-    .not('location', 'is', null);
+    .select('entry_type, value, created_at, trail_id, location_id, locations!inner(id, geojson)')
+    .not('location_id', 'is', null)
+    .order('created_at', { ascending: false });
   if (pointErr) console.error(pointErr);
 
-  const features = (pointRows || [])
-    .filter(r => r.location_geojson && r.location_geojson.coordinates)
-    .map(r => ({
+  const features = [];
+  const seenLocations = new Set();
+  for (const r of pointRows || []) {
+    if (seenLocations.has(r.location_id)) continue;
+    if (!r.locations || !r.locations.geojson) continue;
+    seenLocations.add(r.location_id);
+    features.push({
       type: 'Feature',
-      geometry: r.location_geojson,
+      geometry: r.locations.geojson,
       properties: {
-        id: r.id, entry_type: r.entry_type, trail_id: r.trail_id,
-        value: JSON.stringify(r.value), created_at: r.created_at,
+        location_id: r.location_id,
+        trail_id: r.trail_id,
+        entry_type: r.entry_type,
+        status: r.entry_type === 'status' ? r.value.status : null,
       },
-    }));
+    });
+  }
   pointsSource.setData({ type: 'FeatureCollection', features });
 }
 
-// Fetches every history entry for a trail and renders it as an HTML list —
-// used both by the trail-line popup's "Show history" button and could be
-// reused later for a dedicated trail detail view.
-async function fetchTrailHistoryHtml(trailId) {
+// Fetches every history entry for a trail (filterColumn='trail_id') or a point
+// location (filterColumn='location_id') and renders it as an HTML list, newest
+// first — used by both the trail popup's "Show history" button and every point
+// marker's popup (which always shows its full history, not just the latest
+// entry — a marker is a place things happen to over time, e.g. "tree fell here"
+// followed later by "cleared", not a single fixed state).
+async function fetchHistoryHtml(filterColumn, filterValue) {
   const { data, error } = await sb.from('trail_history')
     .select('id, entry_type, value, created_at')
-    .eq('trail_id', trailId)
+    .eq(filterColumn, filterValue)
     .order('created_at', { ascending: false });
   if (error) return '<div class="history-empty">Could not load history.</div>';
   if (!data.length) return '<div class="history-empty">No history yet.</div>';
@@ -1321,48 +1369,44 @@ map.on('sourcedata', e => {
   if (e.sourceId === 'osmvec' && e.isSourceLoaded) updateTrailStatusOverlay();
 });
 
-// Point-located history entries — click a marker to see what it says, and
-// (if logged in) add another entry at the same spot. Images live in a
-// private bucket, so their URL has to be signed per view.
+// Point-located history entries — click a marker to see its *full* history
+// (not just the latest entry, e.g. "tree fell here" followed later by
+// "cleared" — see supabase/migrations/0004_locations.sql), and, if logged in,
+// add another entry at the same spot.
 let historyPointPopup = null;
 map.on('click', 'history-points', async e => {
   const f = e.features[0];
   const props = f.properties;
-  const value = JSON.parse(props.value);
-  const when = new Date(props.created_at).toLocaleString();
   const [lng, lat] = f.geometry.coordinates;
 
-  let body;
-  if (props.entry_type === 'status') {
-    body = `Status: <strong>${escapeHtml(value.status)}</strong>`;
-  } else if (props.entry_type === 'comment') {
-    body = escapeHtml(value.text);
-  } else {
-    const { data, error } = await sb.storage.from('trail-images').createSignedUrl(value.path, 300);
-    body = error
-      ? '<em>Could not load image</em>'
-      : `<img src="${data.signedUrl}" style="max-width:200px;display:block;border-radius:4px">`;
-  }
+  if (historyPointPopup) historyPointPopup.remove();
+  historyPointPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '260px' })
+    .setLngLat([lng, lat])
+    .setHTML('<strong>Location history</strong><div class="history-empty">Loading…</div>')
+    .addTo(map);
 
+  const historyHtml = await fetchHistoryHtml('location_id', props.location_id);
   const addHereHtml = currentSession
     ? '<div class="popup-trail-actions"><button id="popup-add-here">Add entry here</button></div>'
     : '';
+  // Popup may have been closed/replaced while the fetch above was in flight
+  // (e.g. the user clicked elsewhere) — don't resurrect a stale one.
+  if (historyPointPopup && historyPointPopup.isOpen()) {
+    historyPointPopup.setHTML(`<strong>Location history</strong>${historyHtml}${addHereHtml}`);
+  }
 
-  if (historyPointPopup) historyPointPopup.remove();
-  historyPointPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '240px' })
-    .setLngLat([lng, lat])
-    .setHTML(`${body}<br><small>${when}</small>${addHereHtml}`)
-    .addTo(map);
-
-  if (currentSession) {
+  if (currentSession && historyPointPopup && historyPointPopup.isOpen()) {
     const addHereBtn = historyPointPopup.getElement().querySelector('#popup-add-here');
     if (addHereBtn) addHereBtn.addEventListener('click', () => {
       historyPointPopup.remove();
-      // trailId already known (this point's own trail_id, possibly null for
-      // an entry not linked to any trail) — skips ensureTrailRow entirely,
-      // no OSM identity/props needed since we're not upserting a trails row.
+      // trailId/locationId already known (this marker's own values, trailId
+      // possibly null for a point not linked to any trail) — skips
+      // ensureTrailRow and find_or_create_location entirely, so this can
+      // never end up creating a duplicate trail or snapping to a different
+      // nearby location.
       openEntryForm({
         trailId: props.trail_id || null,
+        locationId: props.location_id,
         label: 'This location',
         location: { lng, lat },
       });

@@ -104,10 +104,14 @@ const VIEWER_STYLE = {
     width: 5, opacity: 0.85,
   },
 
-  // History entries with a point location (windfall pins etc.) — small markers,
-  // colored by entry type.
+  // History entries with a point location (windfall pins etc.) — small markers.
+  // A location whose latest entry is a status update reuses trailStatus's
+  // overgrown/partially_blocked/fully_blocked colors (see index.html's paint
+  // expression); statusClear covers 'clear' specifically (a resolved point,
+  // distinct from "no status ever logged" which just falls to comment/image
+  // coloring). comment/image cover locations with no status entry at all.
   historyPoint: {
-    status:  '#e0791e',
+    statusClear: '#4caf50',
     comment: '#5ba4cf',
     image:   '#9a5ec8',
     radius: 6, strokeColor: '#1a1a1a', strokeWidth: 1.5,
