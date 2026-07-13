@@ -176,31 +176,48 @@ author — **must be run** (SQL Editor) before the insert flow below will work, 
 client code doesn't pass `created_by` explicitly and relies on that default.
 
 **Frontend — click-to-add-entry flow (built):** clicking a feature that qualifies as a
-trail (`getTrailIdentity()`, `index.html`) adds two buttons to its popup when logged
-in: "Add entry to trail" and "Add entry at this point" (hidden behind a "log in first"
-hint otherwise). Either opens a modal (`#entry-form-wrap`) to add a `status`/`comment`/
-`image` entry. On submit: `ensureTrailRow()` upserts the lazy `trails` row (keyed by
-the clicked feature's OSM identity, caching a display snapshot), then inserts into
-`trail_history` — `location` is set only for "at this point" entries (EWKT string
-`SRID=4326;POINT(lng lat)`, the standard way to pass a PostGIS geography value through
-PostgREST; reading it back relies on Supabase's automatic GeoJSON serialization of
-geography columns — **not yet verified against a live insert**, worth checking the
-first time this is actually used, since it's a documented pattern rather than
-something I could test end-to-end here without a real logged-in session in a browser).
+trail (`getTrailIdentity()`, `index.html`) adds buttons to its popup when logged in:
+"Add entry to trail", "Add entry at this point", and (only if the trail already has
+history) "Show history" — hidden behind a "log in first" hint if not logged in. The two
+"add" buttons open a modal (`#entry-form-wrap`) for a `status`/`comment`/`image` entry.
+On submit: `ensureTrailRow()` upserts the lazy `trails` row (keyed by the clicked
+feature's OSM identity, caching a display snapshot), then inserts into `trail_history`
+— `location` is set only for "at this point" entries, as an EWKT string
+`SRID=4326;POINT(lng lat)` (Postgres casts this to `geography` automatically on insert).
 
-**Map display (built):** `trailStatusMap` is fetched from Supabase (latest `status`
-entry per trail) and used to recolor a `trail-status` overlay layer — but since
-Supabase only stores the OSM reference, not geometry, the overlay is rebuilt by
-scanning currently-*rendered* vector tile features and matching their trail identity
-against the map, same technique as the existing selection-highlight code (recomputed
-on `moveend` and `sourcedata`). `'clear'` status (or no status at all) shows no overlay.
-Point-located history entries (any type) are plotted as markers (`history-points`
-layer), clickable to show their value — images are shown via a signed URL (bucket is
-private, 5 min expiry per view).
+**Point markers — "add another entry here" (built):** point-located entries render as
+clickable markers (`history-points` layer); clicking one shows its value and, if
+logged in, an "Add entry here" button that reuses the same `trail_id` and location for
+a follow-up entry (e.g. logging a second update on the same windfall) — this path skips
+`ensureTrailRow` entirely via `pendingEntry.trailId`, since there's no `trails` row
+to find-or-create when it's already known.
+
+**Reading geography columns back out (important, easy to get wrong again):**
+PostgREST returns PostGIS `geography` columns as raw **WKB hex text** by default, not
+GeoJSON — `r.location.coordinates` on a plain `.select('location')` silently gets
+nothing usable (this was a real bug caught before ever reaching a live insert: the
+point-marker code originally assumed GeoJSON and would have rendered zero markers).
+Fixed via a PostgREST "computed column" — `location_geojson(trail_history)` in
+`supabase/migrations/0003_location_geojson.sql`, a SQL function taking the table's row
+type as its sole argument, which PostgREST exposes as a selectable field
+(`.select('..., location_geojson')`) returning `ST_AsGeoJSON(location)::jsonb`. Applies
+anywhere a `geography`/`geometry` column needs to come back through supabase-js as
+usable coordinates — don't reintroduce a raw `.select('location')` expecting GeoJSON.
+
+**Map display (built):** `trailStatusMap` (latest `status` per trail) recolors a
+`trail-status` overlay layer; `trailHistorySet`/`trailIdByKey` (built from the same
+query, dropping the `entry_type='status'` filter) drive the trail popup's "Show
+history" button and skip a second round-trip to look up the trail's id. Since Supabase
+only stores a trail's OSM reference, not its geometry, the overlay is rebuilt by
+scanning currently-*rendered* vector tile features and matching their trail identity,
+same technique as the pre-existing selection-highlight code (recomputed on `moveend`
+and `sourcedata`). `'clear'` status (or no status at all) shows no overlay line, but a
+trail with only comments/images (no status, or a 'clear' one) still gets the "Show
+history" button via `trailHistorySet` — that's a separate check from the overlay color.
+`fetchTrailHistoryHtml()` renders a trail's full history as a scrollable list
+(newest-first) inside the popup on demand; images resolve to a signed URL per view.
 
 **Known gaps / not built yet:**
-- No UI for viewing a trail's *full* history (only latest status feeds the map
-  overlay) — would need a trail detail view.
 - No edit/delete for existing entries — append-only for now.
 - The `is_draft` trail flow (drafting a trail before it exists in OSM) has no UI yet —
   today, `getTrailIdentity()` only recognizes features that already exist in the OSM
@@ -208,6 +225,9 @@ private, 5 min expiry per view).
 - What to do when clicking something that *doesn't* qualify as a trail (no `mtb:scale`/
   `mtb:name`/`route=mtb`) is explicitly deferred — no "not sure how to handle this yet"
   resolution attempted.
+- No standalone "place a marker not tied to any trail" flow — every point-located entry
+  today originates from a trail click ("add entry at this point"), so `trail_id` is
+  always set in practice even though the schema allows it to be null.
 
 ## Future work (not built yet)
 

@@ -216,6 +216,23 @@ select:focus { border-color: #5ba4cf; }
 .popup-trail-actions button:hover { background: #3a5a70; }
 .popup-trail-hint { margin-top: 8px; font-size: 11px; color: #888; }
 
+/* ---- trail history list (inside a MapLibre popup) ---- */
+#popup-history-container:not(:empty) { margin-top: 8px; }
+.history-list {
+  list-style: none;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 12px;
+  color: #ddd;
+}
+.history-list li {
+  padding: 6px 0;
+  border-top: 1px solid #333;
+}
+.history-list li:first-child { border-top: none; }
+.history-list small { color: #888; }
+.history-empty { font-size: 11px; color: #888; margin-top: 4px; }
+
 /* ---- entry form modal ---- */
 #entry-form-wrap {
   position: absolute; inset: 0;
