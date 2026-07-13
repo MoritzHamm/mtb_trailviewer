@@ -76,12 +76,12 @@ class RangeHTTPRequestHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(e.read())
             except BrokenPipeError:
                 pass
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
         except Exception as e:
             try:
                 self.send_error(502, f"Upstream fetch failed: {e}")
-            except BrokenPipeError:
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                 pass
 
     def _serve_range(self, path: str, range_header: str) -> None:
