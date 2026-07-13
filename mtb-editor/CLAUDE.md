@@ -118,9 +118,18 @@ alpha.
 
 ## Supabase backend (trail status/comments)
 
-Schema lives at `supabase/migrations/0001_trails_and_history.sql`. No Supabase project
-exists yet — setup steps below. Frontend integration (supabase-js, login UI, editor UI
-for adding history entries) is not built yet either; this is schema-first.
+Schema lives at `supabase/migrations/0001_trails_and_history.sql` and **is live** —
+project at `gergqrigdshvueljuvlm.supabase.co`, migration applied, RLS verified working
+(anon key gets `[]`/403, authenticated-only access confirmed). Frontend so far: Supabase
+client init + magic-link login UI in `index.html`/`style.css` (bottom-left panel).
+Not built yet: the actual trail-editing UI (adding history entries, trail list view).
+
+**What counts as a "trail" for lazy-population purposes** (matters once the
+candidate-trail lookup/search feature gets built): a **way** needs an `mtb:name` or
+`mtb:scale` tag; a **relation** just needs `route=mtb` — it does **not** need its own
+`mtb:name`/`mtb:scale` tag (relations carry the route grouping/name via
+`type=route`+`route=mtb`, per `foundation/extract_osm.py`'s `RouteRelationCollector`).
+Don't require `mtb:name`/`mtb:scale` on relations when building that lookup.
 
 **Design:**
 - `trails` — one row per OSM way/relation *that's actually been worked on* in the
@@ -158,14 +167,47 @@ match intent):
    everything) — no per-row ownership restrictions. Fine for a small trusted
    maintainer group; tighten later if the group grows.
 
-**Setup steps (not done yet):**
-1. Create a Supabase project.
-2. Run `supabase/migrations/0001_trails_and_history.sql` (SQL Editor, or `supabase db
-   push` once the CLI is linked to the project).
-3. Enable the email OTP / magic-link auth provider in the project's Auth settings.
-4. The Supabase URL + anon key are safe to expose client-side (that's what they're
-   for — RLS is the actual security boundary) — add them to `style-config.js` or a
-   small dedicated config once the frontend wiring starts.
+**Setup status:** project created, `0001_trails_and_history.sql` applied and RLS
+verified live (anon key gets `[]`/403; authenticated-only access confirmed for both
+tables and the `trail-images` bucket). `0002_created_by_defaults.sql` adds
+`default auth.uid()` to `created_by` on both tables plus a check constraint on
+`trail_history` preventing an authenticated user from setting someone else's id as
+author — **must be run** (SQL Editor) before the insert flow below will work, since the
+client code doesn't pass `created_by` explicitly and relies on that default.
+
+**Frontend — click-to-add-entry flow (built):** clicking a feature that qualifies as a
+trail (`getTrailIdentity()`, `index.html`) adds two buttons to its popup when logged
+in: "Add entry to trail" and "Add entry at this point" (hidden behind a "log in first"
+hint otherwise). Either opens a modal (`#entry-form-wrap`) to add a `status`/`comment`/
+`image` entry. On submit: `ensureTrailRow()` upserts the lazy `trails` row (keyed by
+the clicked feature's OSM identity, caching a display snapshot), then inserts into
+`trail_history` — `location` is set only for "at this point" entries (EWKT string
+`SRID=4326;POINT(lng lat)`, the standard way to pass a PostGIS geography value through
+PostgREST; reading it back relies on Supabase's automatic GeoJSON serialization of
+geography columns — **not yet verified against a live insert**, worth checking the
+first time this is actually used, since it's a documented pattern rather than
+something I could test end-to-end here without a real logged-in session in a browser).
+
+**Map display (built):** `trailStatusMap` is fetched from Supabase (latest `status`
+entry per trail) and used to recolor a `trail-status` overlay layer — but since
+Supabase only stores the OSM reference, not geometry, the overlay is rebuilt by
+scanning currently-*rendered* vector tile features and matching their trail identity
+against the map, same technique as the existing selection-highlight code (recomputed
+on `moveend` and `sourcedata`). `'clear'` status (or no status at all) shows no overlay.
+Point-located history entries (any type) are plotted as markers (`history-points`
+layer), clickable to show their value — images are shown via a signed URL (bucket is
+private, 5 min expiry per view).
+
+**Known gaps / not built yet:**
+- No UI for viewing a trail's *full* history (only latest status feeds the map
+  overlay) — would need a trail detail view.
+- No edit/delete for existing entries — append-only for now.
+- The `is_draft` trail flow (drafting a trail before it exists in OSM) has no UI yet —
+  today, `getTrailIdentity()` only recognizes features that already exist in the OSM
+  vector tiles.
+- What to do when clicking something that *doesn't* qualify as a trail (no `mtb:scale`/
+  `mtb:name`/`route=mtb`) is explicitly deferred — no "not sure how to handle this yet"
+  resolution attempted.
 
 ## Future work (not built yet)
 

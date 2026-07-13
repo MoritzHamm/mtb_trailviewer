@@ -147,6 +147,125 @@ select:focus { border-color: #5ba4cf; }
   white-space: nowrap;
 }
 
+/* ---- auth panel ---- */
+#auth-wrap {
+  position: absolute;
+  bottom: 12px; left: 12px;
+  background: rgba(20, 20, 20, 0.88);
+  backdrop-filter: blur(6px);
+  color: #e8e8e8;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  box-shadow: 0 2px 12px rgba(0,0,0,.5);
+}
+
+#auth-signed-out { display: flex; flex-direction: column; gap: 6px; }
+
+#auth-email {
+  background: #2a2a2a;
+  color: #e8e8e8;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  outline: none;
+  width: 180px;
+}
+#auth-email:focus { border-color: #5ba4cf; }
+#auth-email::placeholder { color: #666; }
+
+#auth-send-link {
+  background: #2a4a5f;
+  color: #e8e8e8;
+  border: 1px solid #3a6a8f;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+#auth-send-link:hover { background: #3a5a70; }
+
+#auth-message { color: #888; font-size: 11px; min-height: 14px; }
+
+#auth-signed-in { display: flex; align-items: center; gap: 10px; }
+#auth-email-display { color: #bbb; }
+
+#auth-sign-out {
+  background: none;
+  color: #999;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+#auth-sign-out:hover { color: #ccc; border-color: #666; }
+
+/* ---- trail action buttons (inside a MapLibre popup) ---- */
+.popup-trail-actions { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.popup-trail-actions button {
+  background: #2a4a5f;
+  color: #e8e8e8;
+  border: 1px solid #3a6a8f;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.popup-trail-actions button:hover { background: #3a5a70; }
+.popup-trail-hint { margin-top: 8px; font-size: 11px; color: #888; }
+
+/* ---- entry form modal ---- */
+#entry-form-wrap {
+  position: absolute; inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 50;
+}
+
+#entry-form {
+  background: rgba(20, 20, 20, 0.95);
+  border-radius: 8px;
+  padding: 18px 20px;
+  width: 280px;
+  color: #e8e8e8;
+  box-shadow: 0 4px 24px rgba(0,0,0,.6);
+}
+
+#entry-form h3 { font-size: 15px; margin-bottom: 6px; color: #fff; }
+#entry-form-context { font-size: 12px; color: #999; margin-bottom: 12px; }
+
+#entry-form select, #entry-form textarea, #entry-form input[type=file] {
+  display: block;
+  width: 100%;
+  margin-bottom: 10px;
+  background: #2a2a2a;
+  color: #e8e8e8;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+}
+#entry-form textarea { resize: vertical; min-height: 60px; }
+
+#entry-form-message { font-size: 11px; color: #888; min-height: 14px; margin-bottom: 6px; }
+
+.entry-form-buttons { display: flex; justify-content: flex-end; gap: 8px; }
+.entry-form-buttons button {
+  background: #2a4a5f;
+  color: #e8e8e8;
+  border: 1px solid #3a6a8f;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.entry-form-buttons button:hover { background: #3a5a70; }
+#entry-form-cancel { background: none; border-color: #444; color: #999; }
+#entry-form-cancel:hover { color: #ccc; border-color: #666; background: none; }
+
 /* ---- sun compass ---- */
 #compass-wrap {
   display: flex;

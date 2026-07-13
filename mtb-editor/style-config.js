@@ -93,4 +93,23 @@ const VIEWER_STYLE = {
     places:       { textColor: '#fff', haloColor: '#222' },
     peak:         { color: '#ff8c00' },
   },
+
+  // Trail status overlay (Supabase trail_history, entry_type='status') — drawn as a
+  // colored line under the trail itself, only for non-clear statuses (a clear trail
+  // just looks like a normal trail, no overlay needed).
+  trailStatus: {
+    overgrown:          '#e0b400',
+    partially_blocked:  '#e0791e',
+    fully_blocked:      '#d43d3d',
+    width: 5, opacity: 0.85,
+  },
+
+  // History entries with a point location (windfall pins etc.) — small markers,
+  // colored by entry type.
+  historyPoint: {
+    status:  '#e0791e',
+    comment: '#5ba4cf',
+    image:   '#9a5ec8',
+    radius: 6, strokeColor: '#1a1a1a', strokeWidth: 1.5,
+  },
 };

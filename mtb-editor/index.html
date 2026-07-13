@@ -14,6 +14,7 @@
        pako + UPNG.js decode PNG bytes directly, bypassing canvas entirely. -->
   <script src="https://unpkg.com/pako@2.1.0/dist/pako.min.js"></script>
   <script src="https://unpkg.com/upng-js@2.1.0/UPNG.js"></script>
+  <script src="https://unpkg.com/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <script src="style-config.js"></script>
   <link href="style.css" rel="stylesheet">
 </head>
@@ -92,7 +93,95 @@
 
 <div id="status">Move mouse over the map</div>
 
+<div id="auth-wrap">
+  <div id="auth-signed-out">
+    <input id="auth-email" type="email" placeholder="you@example.com" autocomplete="email">
+    <button id="auth-send-link">Send magic link</button>
+    <div id="auth-message"></div>
+  </div>
+  <div id="auth-signed-in" style="display:none">
+    <span id="auth-email-display"></span>
+    <button id="auth-sign-out">Sign out</button>
+  </div>
+</div>
+
+<div id="entry-form-wrap" style="display:none">
+  <div id="entry-form">
+    <h3 id="entry-form-title">Add entry</h3>
+    <div id="entry-form-context"></div>
+
+    <select id="entry-type-select">
+      <option value="status">Status</option>
+      <option value="comment">Comment</option>
+      <option value="image">Image</option>
+    </select>
+
+    <select id="entry-status-value">
+      <option value="clear">Clear</option>
+      <option value="overgrown">Overgrown</option>
+      <option value="partially_blocked">Partially blocked</option>
+      <option value="fully_blocked">Fully blocked</option>
+    </select>
+    <textarea id="entry-comment-value" placeholder="Comment…" style="display:none"></textarea>
+    <input id="entry-image-value" type="file" accept="image/*" style="display:none">
+
+    <div id="entry-form-message"></div>
+    <div class="entry-form-buttons">
+      <button id="entry-form-cancel">Cancel</button>
+      <button id="entry-form-submit">Submit</button>
+    </div>
+  </div>
+</div>
+
 <script>
+// ---------------------------------------------------------------------------
+// Auth (Supabase) — separate login from the Cloudflare Access one gating the
+// site itself; see mtb-editor/CLAUDE.md for why these aren't unified. The
+// anon/publishable key below is safe to expose client-side by design — it has
+// no privileges beyond what Postgres RLS policies grant (see
+// supabase/migrations/0001_trails_and_history.sql), the same way a public API
+// key works for any Supabase project.
+// ---------------------------------------------------------------------------
+const SUPABASE_URL      = 'https://gergqrigdshvueljuvlm.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_muIQnNtguCHA2i3cIdOsow_OLj866Fk';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const authSignedOut    = document.getElementById('auth-signed-out');
+const authSignedIn     = document.getElementById('auth-signed-in');
+const authEmailInput   = document.getElementById('auth-email');
+const authMessage      = document.getElementById('auth-message');
+const authEmailDisplay = document.getElementById('auth-email-display');
+
+// Tracked globally so the click handler can tell whether to offer "add entry"
+// at all (Supabase writes need a logged-in user regardless of the Cloudflare
+// Access session already gating the site — see mtb-editor/CLAUDE.md).
+let currentSession = null;
+
+function updateAuthUI(session) {
+  currentSession = session;
+  const signedIn = !!session;
+  authSignedOut.style.display = signedIn ? 'none'  : 'flex';
+  authSignedIn.style.display  = signedIn ? 'flex'  : 'none';
+  if (signedIn) authEmailDisplay.textContent = session.user.email;
+  refreshTrailData();
+}
+
+document.getElementById('auth-send-link').addEventListener('click', async () => {
+  const email = authEmailInput.value.trim();
+  if (!email) return;
+  authMessage.textContent = 'Sending…';
+  const { error } = await sb.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: location.href },
+  });
+  authMessage.textContent = error ? `Error: ${error.message}` : 'Check your email for the link.';
+});
+
+document.getElementById('auth-sign-out').addEventListener('click', () => sb.auth.signOut());
+
+sb.auth.onAuthStateChange((_event, session) => updateAuthUI(session));
+sb.auth.getSession().then(({ data }) => updateAuthUI(data.session));
+
 // ---------------------------------------------------------------------------
 // Map init
 // ---------------------------------------------------------------------------
@@ -342,6 +431,16 @@ const map = new maplibregl.Map({
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
       },
+      // Trail status halos + point-located history entries — populated from
+      // Supabase, see refreshTrailData()/updateTrailStatusOverlay() below.
+      'trail-status': {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      },
+      'history-points': {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      },
     },
     layers: [
       { id: 'bg-solid', type: 'background', paint: { 'background-color': VIEWER_STYLE.background.solid } },
@@ -404,6 +503,22 @@ const map = new maplibregl.Map({
           'line-width': VIEWER_STYLE.selection.coreWidth,
           'line-opacity': VIEWER_STYLE.selection.coreOpacity,
           'line-blur': VIEWER_STYLE.selection.coreBlur,
+        },
+      },
+      // Trail status halo (Supabase trail_history status, 'clear' filtered out
+      // client-side before this source is populated — see updateTrailStatusOverlay())
+      { id: 'trail-status-overlay', type: 'line', source: 'trail-status',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['match', ['get', 'status'],
+            'overgrown',         VIEWER_STYLE.trailStatus.overgrown,
+            'partially_blocked', VIEWER_STYLE.trailStatus.partially_blocked,
+            'fully_blocked',     VIEWER_STYLE.trailStatus.fully_blocked,
+            'transparent',
+          ],
+          'line-width': VIEWER_STYLE.trailStatus.width,
+          'line-opacity': VIEWER_STYLE.trailStatus.opacity,
+          'line-blur': 1,
         },
       },
       // Motor roads — casing
@@ -469,6 +584,21 @@ const map = new maplibregl.Map({
         },
         paint: { 'text-color': VIEWER_STYLE.osm.places.textColor, 'text-halo-color': VIEWER_STYLE.osm.places.haloColor, 'text-halo-width': 1.5,
                  'text-opacity': ['interpolate', ['linear'], ['zoom'], 7, 0.7, 12, 1.0] },
+      },
+      // Point-located history entries (windfall pins etc.) — drawn on top of
+      // everything else so they're always visible/clickable.
+      { id: 'history-points', type: 'circle', source: 'history-points',
+        paint: {
+          'circle-radius': VIEWER_STYLE.historyPoint.radius,
+          'circle-color': ['match', ['get', 'entry_type'],
+            'status',  VIEWER_STYLE.historyPoint.status,
+            'comment', VIEWER_STYLE.historyPoint.comment,
+            'image',   VIEWER_STYLE.historyPoint.image,
+            '#999',
+          ],
+          'circle-stroke-color': VIEWER_STYLE.historyPoint.strokeColor,
+          'circle-stroke-width': VIEWER_STYLE.historyPoint.strokeWidth,
+        },
       },
       // grey-out everything outside the tile coverage — disabled for now
       { id: 'coverage-mask', type: 'fill', source: 'coverage',
@@ -802,6 +932,21 @@ function featureLabel(props) {
       || props.waterway || props.railway || props.power || props.natural || 'Unnamed way';
 }
 
+// What counts as a "trail" for the Supabase editor (see mtb-editor/CLAUDE.md):
+// a way qualifies via mtb:name or mtb:scale; a relation qualifies via route=mtb
+// alone (it doesn't need its own mtb:name/mtb:scale — those live on the member
+// ways, or nowhere at all). A relation's route groups multiple way segments
+// into one trail identity, so prefer it over the individual way when present.
+function getTrailIdentity(props) {
+  if (props.route_type === 'mtb' && props.route_relation_id != null) {
+    return { osm_type: 'relation', osm_id: props.route_relation_id };
+  }
+  if (props.mtb_scale || props.mtb_name) {
+    return { osm_type: 'way', osm_id: props.osm_id };
+  }
+  return null;
+}
+
 // Thin lines are hard to hit pixel-perfect (paths render as little as 0.5px
 // wide at low zoom) — query a small box around the click instead of the
 // exact point.
@@ -861,12 +1006,41 @@ map.on('click', e => {
     features: fragments.map(ff => ({ type: 'Feature', geometry: ff.geometry, properties: {} })),
   });
 
+  // Trail entry buttons — only offered for features that qualify as a trail
+  // (see getTrailIdentity) and only when logged in to Supabase (Cloudflare
+  // Access already gates the site, but writing history entries is a separate
+  // login — see mtb-editor/CLAUDE.md).
+  const identity = getTrailIdentity(f.properties);
+  let trailButtonsHtml = '';
+  if (identity) {
+    trailButtonsHtml = currentSession
+      ? `<div class="popup-trail-actions">
+           <button id="popup-add-trail-entry">Add entry to trail</button>
+           <button id="popup-add-point-entry">Add entry at this point</button>
+         </div>`
+      : `<div class="popup-trail-hint">Log in to add trail entries</div>`;
+  }
+
   if (featurePopup) featurePopup.remove();
   featurePopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '240px' })
     .setLngLat(e.lngLat)
-    .setHTML(`<strong>${label}</strong><br>${linkHtml}`)
+    .setHTML(`<strong>${label}</strong><br>${linkHtml}${trailButtonsHtml}`)
     .addTo(map);
   featurePopup.on('close', clearSelection);
+
+  if (identity) {
+    const popupEl = featurePopup.getElement();
+    const trailBtn = popupEl.querySelector('#popup-add-trail-entry');
+    const pointBtn = popupEl.querySelector('#popup-add-point-entry');
+    if (trailBtn) trailBtn.addEventListener('click', () => {
+      featurePopup.remove();
+      openEntryForm({ identity, props: f.properties, label, location: null, clickPoint: e.lngLat });
+    });
+    if (pointBtn) pointBtn.addEventListener('click', () => {
+      featurePopup.remove();
+      openEntryForm({ identity, props: f.properties, label, location: e.lngLat, clickPoint: e.lngLat });
+    });
+  }
 });
 
 // Pointer cursor over the same clickable line features, so it's obvious
@@ -875,6 +1049,237 @@ CLICKABLE_LINE_LAYERS.forEach(id => {
   map.on('mouseenter', id, () => { map.getCanvas().style.cursor = 'pointer'; });
   map.on('mouseleave', id, () => { map.getCanvas().style.cursor = ''; });
 });
+
+// ---------------------------------------------------------------------------
+// Trail history — add entries (status/comment/image) to a trail or a point on
+// it, and show existing entries on the map. See supabase/migrations/ and
+// mtb-editor/CLAUDE.md for the schema/design.
+// ---------------------------------------------------------------------------
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+const entryFormWrap    = document.getElementById('entry-form-wrap');
+const entryFormTitle   = document.getElementById('entry-form-title');
+const entryFormContext = document.getElementById('entry-form-context');
+const entryTypeSelect  = document.getElementById('entry-type-select');
+const entryStatusValue = document.getElementById('entry-status-value');
+const entryCommentValue = document.getElementById('entry-comment-value');
+const entryImageValue  = document.getElementById('entry-image-value');
+const entryFormMessage = document.getElementById('entry-form-message');
+
+let pendingEntry = null;   // { identity, props, label, location, clickPoint }
+
+function openEntryForm({ identity, props, label, location, clickPoint }) {
+  pendingEntry = { identity, props, label, location, clickPoint };
+  entryFormTitle.textContent = location ? 'Add entry at this point' : 'Add entry to trail';
+  entryFormContext.textContent = label;
+  entryTypeSelect.value = 'status';
+  entryStatusValue.value = 'clear';
+  entryCommentValue.value = '';
+  entryImageValue.value = '';
+  updateEntryFormFields();
+  entryFormMessage.textContent = '';
+  entryFormWrap.style.display = 'flex';
+}
+
+function closeEntryForm() {
+  entryFormWrap.style.display = 'none';
+  pendingEntry = null;
+}
+
+function updateEntryFormFields() {
+  const type = entryTypeSelect.value;
+  entryStatusValue.style.display  = type === 'status'  ? 'block' : 'none';
+  entryCommentValue.style.display = type === 'comment' ? 'block' : 'none';
+  entryImageValue.style.display   = type === 'image'   ? 'block' : 'none';
+}
+entryTypeSelect.addEventListener('change', updateEntryFormFields);
+document.getElementById('entry-form-cancel').addEventListener('click', closeEntryForm);
+
+// Finds an existing trails row for this OSM feature, or inserts one (lazy
+// population — see mtb-editor/CLAUDE.md). Upsert rather than select-then-insert
+// so two people touching the same trail at once can't hit the unique constraint.
+// clickPoint is just for caching a display location — always the point the
+// user actually clicked, regardless of whether this entry itself is
+// trail-level or point-level (see the two openEntryForm call sites above).
+async function ensureTrailRow(identity, props, clickPoint) {
+  const displayName = props.route_name || props.name || props.mtb_name || null;
+  const { data, error } = await sb.from('trails')
+    .upsert({
+      osm_type: identity.osm_type,
+      osm_id: identity.osm_id,
+      display_name: displayName,
+      display_mtb_scale: props.mtb_scale || null,
+      display_lon: clickPoint ? clickPoint.lng : null,
+      display_lat: clickPoint ? clickPoint.lat : null,
+      osm_synced_at: new Date().toISOString(),
+    }, { onConflict: 'osm_type,osm_id' })
+    .select('id')
+    .single();
+  if (error) throw error;
+  return data.id;
+}
+
+// Uploads to the private trail-images bucket under a per-trail prefix.
+async function uploadEntryImage(file, trailId) {
+  const path = `${trailId}/${crypto.randomUUID()}-${file.name}`;
+  const { error } = await sb.storage.from('trail-images').upload(path, file);
+  if (error) throw error;
+  return path;
+}
+
+document.getElementById('entry-form-submit').addEventListener('click', async () => {
+  if (!pendingEntry || !currentSession) return;
+  const { identity, props, location, clickPoint } = pendingEntry;
+  const type = entryTypeSelect.value;
+
+  entryFormMessage.textContent = 'Saving…';
+  try {
+    const trailId = await ensureTrailRow(identity, props, clickPoint);
+
+    let value;
+    if (type === 'status') {
+      value = { status: entryStatusValue.value };
+    } else if (type === 'comment') {
+      const text = entryCommentValue.value.trim();
+      if (!text) { entryFormMessage.textContent = 'Enter a comment first.'; return; }
+      value = { text };
+    } else {
+      const file = entryImageValue.files[0];
+      if (!file) { entryFormMessage.textContent = 'Choose an image first.'; return; }
+      const path = await uploadEntryImage(file, trailId);
+      value = { path, content_type: file.type, size_bytes: file.size };
+    }
+
+    const row = { trail_id: trailId, entry_type: type, value };
+    if (location) row.location = `SRID=4326;POINT(${location.lng} ${location.lat})`;
+
+    const { error } = await sb.from('trail_history').insert(row);
+    if (error) throw error;
+
+    closeEntryForm();
+    refreshTrailData();
+  } catch (err) {
+    entryFormMessage.textContent = `Error: ${err.message}`;
+  }
+});
+
+// trailStatusMap: "osm_type:osm_id" -> latest non-null status string. Rebuilt
+// from Supabase on login/logout and after each new entry; the visible overlay
+// (updateTrailStatusOverlay) is then recomputed against whatever's actually
+// rendered, since Supabase only knows the OSM reference, not the geometry.
+const trailStatusMap = new Map();
+
+async function refreshTrailData() {
+  const statusSource = map.getSource('trail-status');
+  const pointsSource = map.getSource('history-points');
+  if (!statusSource || !pointsSource) return;   // style not ready yet — moveend/load will retry
+
+  if (!currentSession) {
+    trailStatusMap.clear();
+    updateTrailStatusOverlay();
+    pointsSource.setData({ type: 'FeatureCollection', features: [] });
+    return;
+  }
+
+  // Latest status per trail. Small data volume for now, so reducing
+  // client-side (first row per trail_id, ordered newest-first) is fine rather
+  // than adding a DB view just for this.
+  const { data: statusRows, error: statusErr } = await sb
+    .from('trail_history')
+    .select('trail_id, created_at, value, trails!inner(osm_type, osm_id)')
+    .eq('entry_type', 'status')
+    .order('created_at', { ascending: false });
+  if (statusErr) console.error(statusErr);
+
+  trailStatusMap.clear();
+  for (const row of statusRows || []) {
+    const key = `${row.trails.osm_type}:${row.trails.osm_id}`;
+    if (!trailStatusMap.has(key)) trailStatusMap.set(key, row.value.status);
+  }
+  updateTrailStatusOverlay();
+
+  // Point-located entries of any type — plotted as markers regardless of
+  // whether they're also linked to a trail.
+  const { data: pointRows, error: pointErr } = await sb
+    .from('trail_history')
+    .select('id, entry_type, value, created_at, location')
+    .not('location', 'is', null);
+  if (pointErr) console.error(pointErr);
+
+  const features = (pointRows || [])
+    .filter(r => r.location && r.location.coordinates)
+    .map(r => ({
+      type: 'Feature',
+      geometry: r.location,
+      properties: {
+        id: r.id, entry_type: r.entry_type,
+        value: JSON.stringify(r.value), created_at: r.created_at,
+      },
+    }));
+  pointsSource.setData({ type: 'FeatureCollection', features });
+}
+
+// Supabase only stores the OSM reference (osm_type/osm_id), not geometry, so
+// the colored overlay has to be rebuilt from whatever's currently rendered —
+// same technique as the selection highlight's multi-fragment matching above.
+// 'clear' status (or no status at all) means no overlay line for that trail.
+function updateTrailStatusOverlay() {
+  const src = map.getSource('trail-status');
+  if (!src) return;
+  if (!trailStatusMap.size) { src.setData({ type: 'FeatureCollection', features: [] }); return; }
+
+  const layers = CLICKABLE_LINE_LAYERS.filter(id => map.getLayer(id));
+  const rendered = map.queryRenderedFeatures(undefined, { layers });
+  const features = [];
+  for (const rf of rendered) {
+    const identity = getTrailIdentity(rf.properties);
+    if (!identity) continue;
+    const trailStatus = trailStatusMap.get(`${identity.osm_type}:${identity.osm_id}`);
+    if (!trailStatus || trailStatus === 'clear') continue;
+    features.push({ type: 'Feature', geometry: rf.geometry, properties: { status: trailStatus } });
+  }
+  src.setData({ type: 'FeatureCollection', features });
+}
+
+map.on('moveend', updateTrailStatusOverlay);
+map.on('load', refreshTrailData);
+map.on('sourcedata', e => {
+  if (e.sourceId === 'osmvec' && e.isSourceLoaded) updateTrailStatusOverlay();
+});
+
+// Point-located history entries — click a marker to see what it says. Images
+// live in a private bucket, so their URL has to be signed per view.
+let historyPointPopup = null;
+map.on('click', 'history-points', async e => {
+  const f = e.features[0];
+  const props = f.properties;
+  const value = JSON.parse(props.value);
+  const when = new Date(props.created_at).toLocaleString();
+
+  let body;
+  if (props.entry_type === 'status') {
+    body = `Status: <strong>${escapeHtml(value.status)}</strong>`;
+  } else if (props.entry_type === 'comment') {
+    body = escapeHtml(value.text);
+  } else {
+    const { data, error } = await sb.storage.from('trail-images').createSignedUrl(value.path, 300);
+    body = error
+      ? '<em>Could not load image</em>'
+      : `<img src="${data.signedUrl}" style="max-width:200px;display:block;border-radius:4px">`;
+  }
+
+  if (historyPointPopup) historyPointPopup.remove();
+  historyPointPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '240px' })
+    .setLngLat(f.geometry.coordinates)
+    .setHTML(`${body}<br><small>${when}</small>`)
+    .addTo(map);
+});
+map.on('mouseenter', 'history-points', () => { map.getCanvas().style.cursor = 'pointer'; });
+map.on('mouseleave', 'history-points', () => { map.getCanvas().style.cursor = ''; });
 
 // ---------------------------------------------------------------------------
 // Background selector
