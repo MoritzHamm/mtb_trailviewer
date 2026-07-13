@@ -116,11 +116,63 @@ alpha.
 - Selection highlight style: bright gold (`#fff700`), two stacked line layers — a wide
   blurred glow plus a narrower crisp core — styled after OSM's iD editor.
 
+## Supabase backend (trail status/comments)
+
+Schema lives at `supabase/migrations/0001_trails_and_history.sql`. No Supabase project
+exists yet — setup steps below. Frontend integration (supabase-js, login UI, editor UI
+for adding history entries) is not built yet either; this is schema-first.
+
+**Design:**
+- `trails` — one row per OSM way/relation *that's actually been worked on* in the
+  editor (`osm_type`/`osm_id`), created lazily rather than bulk-importing every
+  mtb-tagged OSM feature up front. OSM stays authoritative for location/name/
+  `mtb:scale` — this table caches a lightweight display snapshot
+  (`display_name`/`display_mtb_scale`/`display_lon`/`display_lat`, refreshed by the
+  foundation pipeline) so the editor can show a trail list without the map/tiles
+  loaded. Trails can also be **drafted in the editor before they exist in OSM**
+  (`is_draft = true`, `osm_type`/`osm_id` null, geometry in `draft_geometry`) — once
+  the trail's been created in OSM and shows up in a refreshed extract, reconcile by
+  setting `osm_type`/`osm_id` and flipping `is_draft` false. That reconciliation step
+  is manual for now; no automatic changeset-watching exists.
+- `trail_history` — free-form `entry_type`/`value` (jsonb) pairs, matching the "type/
+  value pairs" model directly rather than one column per entry type. Known types
+  (`status`, `comment`, `image`) get their `value` shape checked by a CHECK
+  constraint; unrecognised types pass through unchecked so new entry kinds don't need
+  a migration first. Can attach to a `trail_id`, a `location` (point), or both (e.g.
+  "windfall at this spot on trail X") — at least one is required, deliberately loose
+  otherwise per the original design conversation ("keep it a bit free").
+- Images: `trail-images` Storage bucket (private), referenced by
+  `value->>'path'` on `entry_type='image'` rows.
+
+**Three decisions made without a response during setup** (revisit if these don't
+match intent):
+1. **Auth is a separate Supabase magic-link (email OTP) login**, independent from the
+   Cloudflare Access login already gating the site. Unifying them (having Supabase
+   trust Cloudflare's Access JWT directly) isn't natively supported by Supabase
+   Cloud — Access JWTs are RS256-signed against Cloudflare's own JWKS, and Supabase
+   would need a custom edge function to validate that JWT and mint a Supabase
+   session. Doable, but a separate, more fragile piece of work — not started.
+2. **OSM display snapshot is cached** in `trails` (see above) rather than always
+   resolving live from the vector tiles.
+3. **RLS is fully open to any authenticated user** for both tables (read/write
+   everything) — no per-row ownership restrictions. Fine for a small trusted
+   maintainer group; tighten later if the group grows.
+
+**Setup steps (not done yet):**
+1. Create a Supabase project.
+2. Run `supabase/migrations/0001_trails_and_history.sql` (SQL Editor, or `supabase db
+   push` once the CLI is linked to the project).
+3. Enable the email OTP / magic-link auth provider in the project's Auth settings.
+4. The Supabase URL + anon key are safe to expose client-side (that's what they're
+   for — RLS is the actual security boundary) — add them to `style-config.js` or a
+   small dedicated config once the frontend wiring starts.
+
 ## Future work (not built yet)
 
-- Supabase schema for trail status/comments (authoritative store per repo-root
-  `CLAUDE.md`'s architecture decision)
-- OSM write-back integration for adding/editing trails from the app
+- Frontend Supabase integration: supabase-js, login UI, editor UI for adding/viewing
+  history entries, trail list view
+- OSM write-back integration for creating/editing trails from the app (feeds the
+  `is_draft` reconciliation flow above)
 - Route planning UI (admin assembles a route) + GPX/FIT export + a route-description
   render for participants
 - "Local trail maintainer group" collaboration model
