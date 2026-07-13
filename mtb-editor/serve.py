@@ -125,6 +125,11 @@ class RangeHTTPRequestHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
+        # Without this, browsers happily cache index.html/style-config.js/etc.
+        # across edits during local dev, making a fixed bug look like it's still
+        # broken. Tiles don't change mid-session, but there's no real cost to
+        # revalidating those too.
+        self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
     def log_message(self, fmt, *args):
