@@ -116,4 +116,18 @@ const VIEWER_STYLE = {
     image:   '#9a5ec8',
     radius: 6, strokeColor: '#1a1a1a', strokeWidth: 1.5,
   },
+
+  // Trail view mode — qualifying trails (see getTrailIdentity/QUALIFYING_TRAIL_EXPR
+  // in index.html) get their mtb:scale core (osm-path, already colored) plus a
+  // status glow underneath; everything else dims to dimOpacity so trails pop.
+  // The glow is static per-trail (glowWidth/Blur/Opacity, colored via
+  // VIEWER_STYLE.trailStatus) except for whichever trail is currently selected,
+  // which pulses instead (see startPulse() in index.html) — noInfoPulseColor
+  // covers a selected trail with no status history to pulse a real color for.
+  trailView: {
+    dimOpacity: 0.15,
+    glowWidth: 10, glowBlur: 3, glowOpacity: 0.75,
+    noInfoPulseColor: '#ffe14d',
+    pulse: { periodMs: 1400, opacityMin: 0.35, opacityMax: 0.95, widthMin: 8, widthMax: 16 },
+  },
 };

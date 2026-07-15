@@ -83,6 +83,11 @@
     <input type="checkbox" id="toggle-osm-areas">
   </div>
 
+  <div class="toggle-row">
+    <label for="toggle-trail-view">Trail view mode</label>
+    <input type="checkbox" id="toggle-trail-view">
+  </div>
+
   <div class="toggle-row" id="vert-row" style="opacity:.4;pointer-events:none">
     <label>Vertical scale</label>
     <span class="val" id="vert-val">1.5×</span>
@@ -341,7 +346,7 @@ const START_ZOOM = 8;
 const DEFAULTS = {
   azimuth: 315, altitude: 35, exaggeration: 6,
   terrain3d: false, vertEx: 15,
-  background: 'osm', osmLines: true, osmAreas: false,
+  background: 'osm', osmLines: true, osmAreas: false, trailView: false,
   viewLng: CENTER_LNG, viewLat: CENTER_LAT, viewZoom: START_ZOOM,
   viewBearing: 0, viewPitch: 0,
 };
@@ -437,6 +442,13 @@ const map = new maplibregl.Map({
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
       },
+      // Currently-selected qualifying trail in trail view mode — see
+      // startPulse()/the click handler below. Empty except while a qualifying
+      // trail is selected with trail view mode on.
+      'trail-view-pulse': {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      },
       'history-points': {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
@@ -519,6 +531,39 @@ const map = new maplibregl.Map({
           'line-width': VIEWER_STYLE.trailStatus.width,
           'line-opacity': VIEWER_STYLE.trailStatus.opacity,
           'line-blur': 1,
+        },
+      },
+      // Trail view mode: wide/blurred status glow for every qualifying trail
+      // with a non-clear worst status (reuses the 'trail-status' source built by
+      // updateTrailStatusOverlay() — same data as trail-status-overlay above,
+      // just styled as a glow). Hidden until trail view mode is on; filtered at
+      // runtime to exclude whichever trail is currently selected, since that one
+      // pulses instead (see 'trail-view-pulse-glow' + startPulse()/stopPulse()).
+      { id: 'trail-view-glow', type: 'line', source: 'trail-status',
+        layout: { visibility: 'none', 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['match', ['get', 'status'],
+            'overgrown',         VIEWER_STYLE.trailStatus.overgrown,
+            'partially_blocked', VIEWER_STYLE.trailStatus.partially_blocked,
+            'fully_blocked',     VIEWER_STYLE.trailStatus.fully_blocked,
+            'transparent',
+          ],
+          'line-width': VIEWER_STYLE.trailView.glowWidth,
+          'line-opacity': VIEWER_STYLE.trailView.glowOpacity,
+          'line-blur': VIEWER_STYLE.trailView.glowBlur,
+        },
+      },
+      // Trail view mode: pulsing glow for the currently-selected qualifying
+      // trail — color/opacity/width are set at runtime by startPulse()/
+      // stopPulse(), not static paint values (initial values here are just
+      // placeholders, opacity 0 so nothing shows before a selection exists).
+      { id: 'trail-view-pulse-glow', type: 'line', source: 'trail-view-pulse',
+        layout: { visibility: 'none', 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': VIEWER_STYLE.trailView.noInfoPulseColor,
+          'line-width': VIEWER_STYLE.trailView.pulse.widthMin,
+          'line-opacity': 0,
+          'line-blur': VIEWER_STYLE.trailView.glowBlur,
         },
       },
       // Motor roads — casing
@@ -658,6 +703,8 @@ map.on('style.load', () => {
   applyBackground(loadSetting('background'));
   applyOsmVisibility(OSM_LINE_LAYERS, loadSetting('osmLines'));
   applyOsmVisibility(OSM_AREA_LAYERS, loadSetting('osmAreas'));
+  trailViewMode = loadSetting('trailView');
+  applyTrailViewMode(trailViewMode);
 });
 
 // Persist the view (center/zoom/bearing/pitch) across reloads — saved on
@@ -682,6 +729,7 @@ const toggle3d   = document.getElementById('toggle-3d');
 const bgSelect   = document.getElementById('bg-select');
 const toggleOsmLines = document.getElementById('toggle-osm-lines');
 const toggleOsmAreas = document.getElementById('toggle-osm-areas');
+const toggleTrailView = document.getElementById('toggle-trail-view');
 const azVal      = document.getElementById('az-val');
 const altVal     = document.getElementById('alt-val');
 const exVal      = document.getElementById('ex-val');
@@ -696,6 +744,7 @@ toggle3d.checked    = loadSetting('terrain3d');
 bgSelect.value      = loadSetting('background');
 toggleOsmLines.checked = loadSetting('osmLines');
 toggleOsmAreas.checked = loadSetting('osmAreas');
+toggleTrailView.checked = loadSetting('trailView');
 
 // Sync display labels to restored values
 azVal.textContent  = azSlider.value + '°';
@@ -961,15 +1010,90 @@ function getTrailIdentity(props) {
   return null;
 }
 
+// MapLibre-expression mirror of getTrailIdentity() above, for data-driven paint
+// (dimming non-qualifying paths in trail view mode) rather than per-feature JS
+// checks — keep the two in sync if trail qualification rules ever change.
+const QUALIFYING_TRAIL_EXPR = ['any',
+  ['all', ['==', ['get', 'route_type'], 'mtb'], ['has', 'route_relation_id']],
+  ['has', 'mtb_scale'],
+  ['has', 'mtb_name'],
+];
+
 // Thin lines are hard to hit pixel-perfect (paths render as little as 0.5px
 // wide at low zoom) — query a small box around the click instead of the
 // exact point.
 const CLICK_HIT_TOLERANCE = 6;
 
+// Trail view mode state — see applyTrailViewMode()/startPulse() below.
+let trailViewMode = false;
+let pulseRAF = null;
+let pulseStart = 0;
+
+function stopPulse() {
+  if (pulseRAF != null) cancelAnimationFrame(pulseRAF);
+  pulseRAF = null;
+  if (map.getLayer('trail-view-pulse-glow')) {
+    map.setPaintProperty('trail-view-pulse-glow', 'line-opacity', 0);
+  }
+}
+
+// Breathing opacity/width on the selected trail's glow — color is set once by
+// the caller (worst-status color, or noInfoPulseColor if the trail has no
+// status history), only opacity/width animate here.
+function startPulse(color) {
+  stopPulse();
+  map.setPaintProperty('trail-view-pulse-glow', 'line-color', color);
+  pulseStart = performance.now();
+  const cfg = VIEWER_STYLE.trailView.pulse;
+  function frame(t) {
+    const phase = ((t - pulseStart) % cfg.periodMs) / cfg.periodMs;
+    const s = (Math.sin(phase * Math.PI * 2) + 1) / 2;   // 0..1 ease
+    map.setPaintProperty('trail-view-pulse-glow', 'line-opacity',
+      cfg.opacityMin + s * (cfg.opacityMax - cfg.opacityMin));
+    map.setPaintProperty('trail-view-pulse-glow', 'line-width',
+      cfg.widthMin + s * (cfg.widthMax - cfg.widthMin));
+    pulseRAF = requestAnimationFrame(frame);
+  }
+  pulseRAF = requestAnimationFrame(frame);
+}
+
+// Clears both the gold click-highlight (selected-feature) and, if a qualifying
+// trail's status glow was pulsing in trail view mode, that too — trail-view-glow's
+// filter (which hides the pulsing trail from the static glow layer) resets so
+// the trail goes back to showing its normal static glow once deselected.
 function clearSelection() {
   const src = map.getSource('selected-feature');
   if (src) src.setData({ type: 'FeatureCollection', features: [] });
+  const pulseSrc = map.getSource('trail-view-pulse');
+  if (pulseSrc) pulseSrc.setData({ type: 'FeatureCollection', features: [] });
+  if (map.getLayer('trail-view-glow')) map.setFilter('trail-view-glow', null);
+  stopPulse();
 }
+
+// Dims tracks/roads/non-qualifying paths so qualifying trails (scale core +
+// status glow) visually pop; restores normal opacities on toggle-off. Turning
+// the mode off also drops any active selection/pulse rather than leaving one
+// stranded in an inconsistent (mode-off but still pulsing) state.
+function applyTrailViewMode(on) {
+  map.setLayoutProperty('trail-view-glow', 'visibility', on ? 'visible' : 'none');
+  map.setLayoutProperty('trail-view-pulse-glow', 'visibility', on ? 'visible' : 'none');
+  map.setPaintProperty('osm-path', 'line-opacity', on
+    ? ['case', QUALIFYING_TRAIL_EXPR, VIEWER_STYLE.osm.path.opacity, VIEWER_STYLE.trailView.dimOpacity]
+    : VIEWER_STYLE.osm.path.opacity);
+  map.setPaintProperty('osm-track', 'line-opacity',
+    on ? VIEWER_STYLE.trailView.dimOpacity : VIEWER_STYLE.osm.track.opacity);
+  map.setPaintProperty('osm-road-casing', 'line-opacity',
+    on ? VIEWER_STYLE.trailView.dimOpacity : VIEWER_STYLE.osm.roadCasing.opacity);
+  map.setPaintProperty('osm-road-fill', 'line-opacity',
+    on ? VIEWER_STYLE.trailView.dimOpacity : VIEWER_STYLE.osm.roadFill.opacity);
+  if (!on) clearSelection();
+}
+
+toggleTrailView.addEventListener('change', e => {
+  trailViewMode = e.target.checked;
+  applyTrailViewMode(trailViewMode);
+  saveSetting('trailView', trailViewMode);
+});
 
 let featurePopup = null;
 map.on('click', e => {
@@ -1005,26 +1129,13 @@ map.on('click', e => {
     linkHtml = '<em>no OSM id on this feature</em>';
   }
 
-  // Vector tiles clip long ways at tile boundaries, so a single OSM way can
-  // render as several separate features (same osm_id, different clipped
-  // geometry) — highlight every currently-rendered fragment of this way, not
-  // just the one under the cursor, or the glow looks like several unrelated
-  // segments instead of one trail. Querying with no geometry arg searches the
-  // whole current viewport rather than a single point/box.
-  const fragments = osmId != null
-    ? map.queryRenderedFeatures(undefined, { layers }).filter(ff => ff.properties.osm_id === osmId)
-    : [f];
-
-  map.getSource('selected-feature').setData({
-    type: 'FeatureCollection',
-    features: fragments.map(ff => ({ type: 'Feature', geometry: ff.geometry, properties: {} })),
-  });
-
   // Trail entry buttons — only offered for features that qualify as a trail
   // (see getTrailIdentity) and only when logged in to Supabase (Cloudflare
   // Access already gates the site, but writing history entries is a separate
   // login — see mtb-editor/CLAUDE.md). "Show history" only appears if this
   // trail actually has entries (trailHistorySet), populated by refreshTrailData.
+  // Computed here (rather than after the highlight below) because trail view
+  // mode needs it to decide which highlight style to use.
   const identity = getTrailIdentity(f.properties);
   const historyKey = identity ? `${identity.osm_type}:${identity.osm_id}` : null;
   const hasHistory = historyKey && trailHistorySet.has(historyKey);
@@ -1038,6 +1149,38 @@ map.on('click', e => {
          </div>
          <div id="popup-history-container"></div>`
       : `<div class="popup-trail-hint">Log in to add trail entries</div>`;
+  }
+
+  // Vector tiles clip long ways at tile boundaries, so a single OSM way can
+  // render as several separate features (same osm_id, different clipped
+  // geometry) — highlight every currently-rendered fragment of this way, not
+  // just the one under the cursor, or the glow looks like several unrelated
+  // segments instead of one trail. Querying with no geometry arg searches the
+  // whole current viewport rather than a single point/box.
+  const fragments = osmId != null
+    ? map.queryRenderedFeatures(undefined, { layers }).filter(ff => ff.properties.osm_id === osmId)
+    : [f];
+  const fragmentFeatures = fragments.map(ff => ({ type: 'Feature', geometry: ff.geometry, properties: {} }));
+
+  // In trail view mode, a qualifying trail's selection indicator is its own
+  // status glow starting to pulse (see startPulse()) rather than the generic
+  // gold click-highlight — the pulse itself communicates "this is selected".
+  // Everything else (non-qualifying features, or any feature when trail view
+  // mode is off) keeps the normal gold selection-glow/selection-core halo.
+  if (trailViewMode && identity) {
+    map.getSource('selected-feature').setData({ type: 'FeatureCollection', features: [] });
+    map.getSource('trail-view-pulse').setData({ type: 'FeatureCollection', features: fragmentFeatures });
+    const key = `${identity.osm_type}:${identity.osm_id}`;
+    map.setFilter('trail-view-glow', ['!=', ['get', 'identity_key'], key]);
+    const worst = trailStatusMap.get(key);
+    const severity = STATUS_SEVERITY[worst] || 0;
+    const pulseColor = severity > 0 ? VIEWER_STYLE.trailStatus[worst] : VIEWER_STYLE.trailView.noInfoPulseColor;
+    startPulse(pulseColor);
+  } else {
+    map.getSource('trail-view-pulse').setData({ type: 'FeatureCollection', features: [] });
+    map.setFilter('trail-view-glow', null);
+    stopPulse();
+    map.getSource('selected-feature').setData({ type: 'FeatureCollection', features: fragmentFeatures });
   }
 
   if (featurePopup) featurePopup.remove();
@@ -1218,7 +1361,14 @@ document.getElementById('entry-form-submit').addEventListener('click', async () 
   }
 });
 
-// trailStatusMap: "osm_type:osm_id" -> latest non-null status string.
+// trailStatusMap: "osm_type:osm_id" -> worst currently-active status string
+// across the trail. "Worst" means: take the *latest* status at each point on
+// the trail separately (the trail-level bucket, i.e. entries with no
+// location_id, plus every location_id tied to it — e.g. "tree fell here" then
+// later "cleared" at that same spot resolves to 'clear' for that point), then
+// the highest-severity value across those latest-per-point results wins. This
+// matters because a recent 'clear' logged at one spot must not hide an older,
+// still-unresolved 'fully_blocked' logged somewhere else on the same trail.
 // trailHistorySet: same keys, but for *any* history entry (status, comment,
 // or image) — drives the "Show history" button in a trail's popup, since a
 // trail can have comments/images with no status entry at all (or a 'clear'
@@ -1229,6 +1379,7 @@ document.getElementById('entry-form-submit').addEventListener('click', async () 
 // the visible overlay (updateTrailStatusOverlay) is then recomputed against
 // whatever's actually rendered, since Supabase only knows the OSM reference
 // for a trail, not its geometry.
+const STATUS_SEVERITY = { clear: 0, overgrown: 1, partially_blocked: 2, fully_blocked: 3 };
 const trailStatusMap = new Map();
 const trailHistorySet = new Set();
 const trailIdByKey = new Map();
@@ -1253,20 +1404,29 @@ async function refreshTrailData() {
   // adding a DB view for it.
   const { data: historyRows, error: historyErr } = await sb
     .from('trail_history')
-    .select('trail_id, entry_type, created_at, value, trails!inner(id, osm_type, osm_id)')
+    .select('trail_id, location_id, entry_type, created_at, value, trails!inner(id, osm_type, osm_id)')
     .order('created_at', { ascending: false });
   if (historyErr) console.error(historyErr);
 
   trailStatusMap.clear();
   trailHistorySet.clear();
   trailIdByKey.clear();
+  // pointKey -> latest status at that point (trail-level bucket if
+  // location_id is null, otherwise that location) — historyRows is
+  // newest-first, so the first status entry seen per point is its latest.
+  const latestPerPoint = new Map();
   for (const row of historyRows || []) {
     const key = `${row.trails.osm_type}:${row.trails.osm_id}`;
     trailHistorySet.add(key);
     trailIdByKey.set(key, row.trails.id);
-    if (row.entry_type === 'status' && !trailStatusMap.has(key)) {
-      trailStatusMap.set(key, row.value.status);
+    if (row.entry_type === 'status') {
+      const pointKey = `${key} ${row.location_id ?? ''}`;
+      if (!latestPerPoint.has(pointKey)) latestPerPoint.set(pointKey, { key, status: row.value.status });
     }
+  }
+  for (const { key, status } of latestPerPoint.values()) {
+    const prev = trailStatusMap.get(key);
+    if (!prev || STATUS_SEVERITY[status] > STATUS_SEVERITY[prev]) trailStatusMap.set(key, status);
   }
   updateTrailStatusOverlay();
 
@@ -1356,9 +1516,13 @@ function updateTrailStatusOverlay() {
   for (const rf of rendered) {
     const identity = getTrailIdentity(rf.properties);
     if (!identity) continue;
-    const trailStatus = trailStatusMap.get(`${identity.osm_type}:${identity.osm_id}`);
+    const key = `${identity.osm_type}:${identity.osm_id}`;
+    const trailStatus = trailStatusMap.get(key);
     if (!trailStatus || trailStatus === 'clear') continue;
-    features.push({ type: 'Feature', geometry: rf.geometry, properties: { status: trailStatus } });
+    // identity_key lets trail-view-glow (index.html style layers) filter out
+    // whichever trail is currently selected/pulsing, since that one owns its
+    // own glow via trail-view-pulse-glow instead of the static one here.
+    features.push({ type: 'Feature', geometry: rf.geometry, properties: { status: trailStatus, identity_key: key } });
   }
   src.setData({ type: 'FeatureCollection', features });
 }
