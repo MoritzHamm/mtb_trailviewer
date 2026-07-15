@@ -1618,7 +1618,12 @@ const OSM_AREA_LAYERS = [
 
 function applyOsmVisibility(layers, visible) {
   const vis = visible ? 'visible' : 'none';
-  layers.forEach(id => { try { map.setLayoutProperty(id, 'visibility', vis); } catch(_) {} });
+  // The peak layers (osm-peaks-tri/label) are added later, in map.on('load')
+  // (see comment there) — style.load's first pass runs before they exist.
+  // MapLibre fires a genuine 'error' event for styling a missing layer rather
+  // than throwing synchronously, so try/catch alone doesn't suppress the
+  // console noise — skip missing layers outright instead.
+  layers.forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis); });
 }
 
 toggleOsmLines.addEventListener('change', e => {
