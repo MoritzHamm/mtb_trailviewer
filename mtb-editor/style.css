@@ -216,8 +216,7 @@ select:focus { border-color: #5ba4cf; }
 .popup-trail-actions button:hover { background: #3a5a70; }
 .popup-trail-hint { margin-top: 8px; font-size: 11px; color: #888; }
 
-/* ---- trail history list (inside a MapLibre popup) ---- */
-#popup-history-container:not(:empty) { margin-top: 8px; }
+/* ---- trail history list (also reused inside #entry-form-history) ---- */
 .history-list {
   list-style: none;
   max-height: 180px;
@@ -233,6 +232,30 @@ select:focus { border-color: #5ba4cf; }
 .history-list small { color: #888; }
 .history-empty { font-size: 11px; color: #888; margin-top: 4px; }
 
+.history-thumb {
+  max-width: 160px; max-height: 160px; display: block; border-radius: 4px;
+  cursor: zoom-in; margin-top: 4px;
+}
+.history-delete {
+  background: none; border: none; color: #666; font-size: 11px; cursor: pointer;
+  margin-left: 6px; padding: 0; vertical-align: middle;
+}
+.history-delete:hover { color: #d43d3d; }
+
+/* ---- full-size image lightbox (opened from a .history-thumb) ---- */
+#image-lightbox-wrap {
+  position: absolute; inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex; align-items: center; justify-content: center;
+  cursor: zoom-out;
+  z-index: 60;
+}
+#image-lightbox-img {
+  max-width: 92vw; max-height: 92vh;
+  border-radius: 4px;
+  box-shadow: 0 4px 24px rgba(0,0,0,.6);
+}
+
 /* ---- entry form modal ---- */
 #entry-form-wrap {
   position: absolute; inset: 0;
@@ -245,13 +268,29 @@ select:focus { border-color: #5ba4cf; }
   background: rgba(20, 20, 20, 0.95);
   border-radius: 8px;
   padding: 18px 20px;
-  width: 280px;
+  width: 320px;
+  max-height: 80vh;
+  overflow-y: auto;
   color: #e8e8e8;
   box-shadow: 0 4px 24px rgba(0,0,0,.6);
 }
 
-#entry-form h3 { font-size: 15px; margin-bottom: 6px; color: #fff; }
-#entry-form-context { font-size: 12px; color: #999; margin-bottom: 12px; }
+.entry-form-header { display: flex; align-items: center; justify-content: space-between; }
+#entry-form h3 { font-size: 15px; margin-bottom: 0; color: #fff; }
+#entry-form-close {
+  background: none; border: none; color: #999; font-size: 15px; line-height: 1;
+  cursor: pointer; padding: 2px;
+}
+#entry-form-close:hover { color: #ccc; }
+#entry-form-context { font-size: 12px; color: #999; margin: 6px 0 12px; }
+
+#entry-form-history:not(:empty) { margin-bottom: 14px; }
+#entry-form-history .history-list { max-height: 220px; }
+
+.entry-form-add-label {
+  font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: .04em;
+  margin-bottom: 6px;
+}
 
 #entry-form select, #entry-form textarea, #entry-form input[type=file] {
   display: block;
@@ -267,21 +306,7 @@ select:focus { border-color: #5ba4cf; }
 }
 #entry-form textarea { resize: vertical; min-height: 60px; }
 
-#entry-form-message { font-size: 11px; color: #888; min-height: 14px; margin-bottom: 6px; }
-
-.entry-form-buttons { display: flex; justify-content: flex-end; gap: 8px; }
-.entry-form-buttons button {
-  background: #2a4a5f;
-  color: #e8e8e8;
-  border: 1px solid #3a6a8f;
-  border-radius: 4px;
-  padding: 6px 12px;
-  font-size: 12px;
-  cursor: pointer;
-}
-.entry-form-buttons button:hover { background: #3a5a70; }
-#entry-form-cancel { background: none; border-color: #444; color: #999; }
-#entry-form-cancel:hover { color: #ccc; border-color: #666; background: none; }
+#entry-form-message { font-size: 11px; color: #888; min-height: 14px; }
 
 /* ---- sun compass ---- */
 #compass-wrap {

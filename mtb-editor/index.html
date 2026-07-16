@@ -112,30 +112,30 @@
 
 <div id="entry-form-wrap" style="display:none">
   <div id="entry-form">
-    <h3 id="entry-form-title">Add entry</h3>
+    <div class="entry-form-header">
+      <h3>History</h3>
+      <button id="entry-form-close" aria-label="Close" title="Close">✕</button>
+    </div>
     <div id="entry-form-context"></div>
+    <div id="entry-form-history"></div>
 
-    <select id="entry-type-select">
-      <option value="status">Status</option>
-      <option value="comment">Comment</option>
-      <option value="image">Image</option>
-    </select>
-
-    <select id="entry-status-value">
+    <div class="entry-form-add-label">Add an update</div>
+    <select id="entry-status-value" title="Setting this saves immediately">
+      <option value="">No status update</option>
       <option value="clear">Clear</option>
       <option value="overgrown">Overgrown</option>
       <option value="partially_blocked">Partially blocked</option>
       <option value="fully_blocked">Fully blocked</option>
     </select>
-    <textarea id="entry-comment-value" placeholder="Comment…" style="display:none"></textarea>
-    <input id="entry-image-value" type="file" accept="image/*" style="display:none">
+    <textarea id="entry-comment-value" placeholder="Comment… (Enter to save, Ctrl+Enter for a new line)"></textarea>
+    <input id="entry-image-value" type="file" accept="image/*" title="Uploads immediately">
 
     <div id="entry-form-message"></div>
-    <div class="entry-form-buttons">
-      <button id="entry-form-cancel">Cancel</button>
-      <button id="entry-form-submit">Submit</button>
-    </div>
   </div>
+</div>
+
+<div id="image-lightbox-wrap" style="display:none">
+  <img id="image-lightbox-img" alt="Full-size photo">
 </div>
 
 <script>
@@ -1149,22 +1149,20 @@ map.on('click', e => {
   // Trail entry buttons — only offered for features that qualify as a trail
   // (see getTrailIdentity) and only when logged in to Supabase (Cloudflare
   // Access already gates the site, but writing history entries is a separate
-  // login — see mtb-editor/CLAUDE.md). "Show history" only appears if this
-  // trail actually has entries (trailHistorySet), populated by refreshTrailData.
-  // Computed here (rather than after the highlight below) because trail view
-  // mode needs it to decide which highlight style to use.
+  // login — see mtb-editor/CLAUDE.md). "Trail history" always shows (it opens
+  // the unified view+add panel — see openEntryForm — whether or not the trail
+  // has any history yet). Computed here (rather than after the highlight
+  // below) because trail view mode needs it to decide which highlight style
+  // to use.
   const identity = getTrailIdentity(f.properties);
   const historyKey = identity ? `${identity.osm_type}:${identity.osm_id}` : null;
-  const hasHistory = historyKey && trailHistorySet.has(historyKey);
   let trailButtonsHtml = '';
   if (identity) {
     trailButtonsHtml = currentSession
       ? `<div class="popup-trail-actions">
-           ${hasHistory ? '<button id="popup-show-history">Show history</button>' : ''}
-           <button id="popup-add-trail-entry">Add entry to trail</button>
+           <button id="popup-trail-history">Trail history</button>
            <button id="popup-add-point-entry">Add entry at this point</button>
-         </div>
-         <div id="popup-history-container"></div>`
+         </div>`
       : `<div class="popup-trail-hint">Log in to add trail entries</div>`;
   }
 
@@ -1221,24 +1219,22 @@ map.on('click', e => {
 
   if (identity) {
     const popupEl = featurePopup.getElement();
-    const trailBtn    = popupEl.querySelector('#popup-add-trail-entry');
-    const pointBtn    = popupEl.querySelector('#popup-add-point-entry');
-    const historyBtn  = popupEl.querySelector('#popup-show-history');
-    if (trailBtn) trailBtn.addEventListener('click', () => {
+    const trailHistoryBtn = popupEl.querySelector('#popup-trail-history');
+    const pointBtn        = popupEl.querySelector('#popup-add-point-entry');
+    if (trailHistoryBtn) trailHistoryBtn.addEventListener('click', () => {
       featurePopup.remove();
-      openEntryForm({ identity, props: f.properties, label, location: null, clickPoint: e.lngLat });
+      // Seed trailId from the cache if this trail's been touched before, so
+      // the panel's history list loads immediately instead of showing "No
+      // history yet" until the first add resolves it (see pendingEntry's
+      // trade-off comment near openEntryForm).
+      openEntryForm({
+        identity, props: f.properties, label, location: null, clickPoint: e.lngLat,
+        trailId: trailIdByKey.get(historyKey) || null,
+      });
     });
     if (pointBtn) pointBtn.addEventListener('click', () => {
       featurePopup.remove();
       openEntryForm({ identity, props: f.properties, label, location: e.lngLat, clickPoint: e.lngLat });
-    });
-    if (historyBtn) historyBtn.addEventListener('click', async () => {
-      const container = popupEl.querySelector('#popup-history-container');
-      container.textContent = 'Loading…';
-      const trailId = trailIdByKey.get(historyKey);
-      container.innerHTML = trailId
-        ? await fetchHistoryHtml('trail_id', trailId)
-        : '<div class="history-empty">No history yet.</div>';
     });
   }
 });
@@ -1261,50 +1257,64 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-const entryFormWrap    = document.getElementById('entry-form-wrap');
-const entryFormTitle   = document.getElementById('entry-form-title');
-const entryFormContext = document.getElementById('entry-form-context');
-const entryTypeSelect  = document.getElementById('entry-type-select');
-const entryStatusValue = document.getElementById('entry-status-value');
+const entryFormWrap     = document.getElementById('entry-form-wrap');
+const entryFormContext  = document.getElementById('entry-form-context');
+const entryFormHistory  = document.getElementById('entry-form-history');
+const entryStatusValue  = document.getElementById('entry-status-value');
 const entryCommentValue = document.getElementById('entry-comment-value');
-const entryImageValue  = document.getElementById('entry-image-value');
-const entryFormMessage = document.getElementById('entry-form-message');
+const entryImageValue   = document.getElementById('entry-image-value');
+const entryFormMessage  = document.getElementById('entry-form-message');
 
 // { identity, props, label, location, clickPoint, trailId, locationId }.
-// trailId is set directly when adding to an already-known trail (e.g. from a
-// history-point marker's "Add entry here") — that path skips
-// ensureTrailRow/identity/props entirely, since there's no trails row left to
-// find-or-create. Likewise locationId is set directly from that same marker
-// (its own location_id), skipping find_or_create_location — the marker's
-// history should never end up snapping to a *different* nearby location.
+// trailId/locationId, when passed in already known, mean "definitely already
+// exists, skip ensureTrailRow/find_or_create_location entirely" — today only
+// the history-point marker's "Add entry here" flow has both from the start
+// (its own trail_id/location_id), since it's the only flow with no
+// identity/props/clickPoint to resolve them from otherwise. The trail-popup
+// flow instead seeds trailId as a *hint* from the trailIdByKey cache so the
+// history list can load immediately without waiting for a submit — a trade-off
+// worth knowing: once a trail has that cached id, ensureTrailRow's upsert
+// (which refreshes display_name/display_mtb_scale from current OSM tags) no
+// longer re-runs on every subsequent add, only the very first time the trail
+// is ever touched. Acceptable since those fields are just a display cache
+// (foundation/CLAUDE.md), not the source of truth.
 let pendingEntry = null;
 
-function openEntryForm({ identity, props, label, location, clickPoint, trailId, locationId }) {
-  pendingEntry = { identity, props, label, location, clickPoint, trailId, locationId };
-  entryFormTitle.textContent = location ? 'Add entry at this point' : 'Add entry to trail';
+// Opens the unified history-view-and-add panel and loads whatever history
+// already exists for it (see refreshEntryFormHistory) — replaces the old
+// separate "Show history" button/inline display entirely.
+async function openEntryForm({ identity, props, label, location, clickPoint, trailId, locationId }) {
+  pendingEntry = { identity, props, label, location, clickPoint, trailId: trailId || null, locationId: locationId || null };
   entryFormContext.textContent = label;
-  entryTypeSelect.value = 'status';
-  entryStatusValue.value = 'clear';
+  entryStatusValue.value = '';
   entryCommentValue.value = '';
   entryImageValue.value = '';
-  updateEntryFormFields();
   entryFormMessage.textContent = '';
   entryFormWrap.style.display = 'flex';
+  await refreshEntryFormHistory();
 }
 
 function closeEntryForm() {
   entryFormWrap.style.display = 'none';
   pendingEntry = null;
 }
+document.getElementById('entry-form-close').addEventListener('click', closeEntryForm);
 
-function updateEntryFormFields() {
-  const type = entryTypeSelect.value;
-  entryStatusValue.style.display  = type === 'status'  ? 'block' : 'none';
-  entryCommentValue.style.display = type === 'comment' ? 'block' : 'none';
-  entryImageValue.style.display   = type === 'image'   ? 'block' : 'none';
+// Re-renders the history list from pendingEntry's *current* trailId/locationId
+// — called on open and again after each successful add, so the panel keeps
+// reflecting what's actually saved without needing to be reopened. A known
+// location takes priority over a known trail when both exist (a marker shows
+// its own point's history, not the whole trail's — matches the old
+// 'location_id'-filtered fetch for markers).
+async function refreshEntryFormHistory() {
+  if (!pendingEntry) return;
+  const { trailId, locationId } = pendingEntry;
+  entryFormHistory.innerHTML = locationId
+    ? await fetchHistoryHtml('location_id', locationId)
+    : trailId
+      ? await fetchHistoryHtml('trail_id', trailId)
+      : '<div class="history-empty">No history yet.</div>';
 }
-entryTypeSelect.addEventListener('change', updateEntryFormFields);
-document.getElementById('entry-form-cancel').addEventListener('click', closeEntryForm);
 
 // Finds an existing trails row for this OSM feature, or inserts one (lazy
 // population — see mtb-editor/CLAUDE.md). Upsert rather than select-then-insert
@@ -1330,64 +1340,132 @@ async function ensureTrailRow(identity, props, clickPoint) {
   return data.id;
 }
 
-// Uploads to the private trail-images bucket under a per-trail prefix.
-async function uploadEntryImage(file, trailId) {
-  const path = `${trailId}/${crypto.randomUUID()}-${file.name}`;
-  const { error } = await sb.storage.from('trail-images').upload(path, file);
-  if (error) throw error;
-  return path;
+// Resolves (and caches on pendingEntry) the trail/location this panel is
+// scoped to — shared by every auto-submit handler below, since each one can
+// fire independently (status change, image pick, comment Enter) and all need
+// the same ids. Idempotent: a later call in the same panel session just
+// returns the already-resolved ids instead of re-upserting/re-snapping.
+async function ensurePendingIds() {
+  const { identity, props, location, clickPoint } = pendingEntry;
+  const trailId = pendingEntry.trailId
+    || (identity ? await ensureTrailRow(identity, props, clickPoint) : null);
+  pendingEntry.trailId = trailId;
+
+  // A brand-new point (starting fresh from a trail's popup) snaps to an
+  // existing nearby location if one's within range, rather than always
+  // creating a new one — see find_or_create_location in
+  // supabase/migrations/0004_locations.sql. A point added via an existing
+  // marker's "Add entry here" already has locationId and skips this, so it
+  // can never end up attached to the wrong nearby location.
+  let locationId = pendingEntry.locationId;
+  if (!locationId && location) {
+    const { data: locId, error: locErr } = await sb.rpc('find_or_create_location', {
+      p_lng: location.lng, p_lat: location.lat,
+    });
+    if (locErr) throw locErr;
+    locationId = locId;
+    pendingEntry.locationId = locationId;
+  }
+  return { trailId, locationId };
 }
 
-document.getElementById('entry-form-submit').addEventListener('click', async () => {
+// Inserts one row and refreshes the panel/map — the shared tail end of every
+// auto-submit handler below.
+async function submitEntry(entry_type, value) {
   if (!pendingEntry || !currentSession) return;
-  const { identity, props, location, clickPoint,
-          trailId: knownTrailId, locationId: knownLocationId } = pendingEntry;
-  const type = entryTypeSelect.value;
-
   entryFormMessage.textContent = 'Saving…';
   try {
-    const trailId = knownTrailId || (identity ? await ensureTrailRow(identity, props, clickPoint) : null);
-
-    // A brand-new point (starting fresh from a trail's popup) snaps to an
-    // existing nearby location if one's within range, rather than always
-    // creating a new one — see find_or_create_location in
-    // supabase/migrations/0004_locations.sql. A point added via an existing
-    // marker's "Add entry here" already has knownLocationId and skips this,
-    // so it can never end up attached to the wrong nearby location.
-    let locationId = knownLocationId || null;
-    if (!locationId && location) {
-      const { data: locId, error: locErr } = await sb.rpc('find_or_create_location', {
-        p_lng: location.lng, p_lat: location.lat,
-      });
-      if (locErr) throw locErr;
-      locationId = locId;
-    }
-
-    let value;
-    if (type === 'status') {
-      value = { status: entryStatusValue.value };
-    } else if (type === 'comment') {
-      const text = entryCommentValue.value.trim();
-      if (!text) { entryFormMessage.textContent = 'Enter a comment first.'; return; }
-      value = { text };
-    } else {
-      const file = entryImageValue.files[0];
-      if (!file) { entryFormMessage.textContent = 'Choose an image first.'; return; }
-      const path = await uploadEntryImage(file, trailId || locationId);
-      value = { path, content_type: file.type, size_bytes: file.size };
-    }
-
-    const row = { trail_id: trailId, entry_type: type, value };
+    const { trailId, locationId } = await ensurePendingIds();
+    const row = { trail_id: trailId, entry_type, value };
     if (locationId) row.location_id = locationId;
-
     const { error } = await sb.from('trail_history').insert(row);
     if (error) throw error;
-
-    closeEntryForm();
+    entryFormMessage.textContent = '';
+    await refreshEntryFormHistory();
     refreshTrailData();
   } catch (err) {
     entryFormMessage.textContent = `Error: ${err.message}`;
   }
+}
+
+// Downscales an image client-side (longest edge maxDim, JPEG) for the history
+// list's thumbnail — the full-resolution original is still uploaded and used
+// for the lightbox, but the list itself only ever downloads the small one.
+async function makeThumbnail(file, maxDim = 400, quality = 0.82) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+  return new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+}
+
+// Uploads the original to the private trail-images bucket under a per-trail
+// prefix, plus a generated thumbnail alongside it (same id, so the two are
+// easy to find/clean up together on delete). Thumbnail generation failing
+// (unsupported format, corrupt file, etc.) doesn't block the real upload —
+// fetchHistoryHtml falls back to the full image if no thumb_path exists.
+async function uploadEntryImage(file, prefix) {
+  const id = crypto.randomUUID();
+  const path = `${prefix}/${id}-${file.name}`;
+  const { error } = await sb.storage.from('trail-images').upload(path, file);
+  if (error) throw error;
+
+  let thumbPath = null;
+  try {
+    const thumbBlob = await makeThumbnail(file);
+    if (thumbBlob) {
+      thumbPath = `${prefix}/${id}-thumb.jpg`;
+      const { error: thumbErr } = await sb.storage.from('trail-images')
+        .upload(thumbPath, thumbBlob, { contentType: 'image/jpeg' });
+      if (thumbErr) throw thumbErr;
+    }
+  } catch (thumbGenErr) {
+    console.error('Thumbnail generation failed, falling back to the full image', thumbGenErr);
+    thumbPath = null;
+  }
+
+  return { path, thumbPath };
+}
+
+// Setting a status saves immediately — no separate Add step. Resets back to
+// the blank "No status update" option right away so the dropdown always
+// reads as "nothing pending"; the history list below is what shows what's
+// actually been saved.
+entryStatusValue.addEventListener('change', async () => {
+  const status = entryStatusValue.value;
+  entryStatusValue.value = '';
+  if (!status) return;
+  await submitEntry('status', { status });
+});
+
+// Picking a file uploads immediately — no separate Add step.
+entryImageValue.addEventListener('change', async () => {
+  const file = entryImageValue.files[0];
+  entryImageValue.value = '';
+  if (!file || !pendingEntry || !currentSession) return;
+  entryFormMessage.textContent = 'Uploading…';
+  try {
+    const { trailId, locationId } = await ensurePendingIds();
+    const { path, thumbPath } = await uploadEntryImage(file, trailId || locationId);
+    await submitEntry('image', { path, thumb_path: thumbPath, content_type: file.type, size_bytes: file.size });
+  } catch (err) {
+    entryFormMessage.textContent = `Error: ${err.message}`;
+  }
+});
+
+// Enter saves the comment immediately (chat-style); Ctrl+Enter inserts a
+// literal newline instead (falls through to the textarea's normal behavior).
+entryCommentValue.addEventListener('keydown', async e => {
+  if (e.key !== 'Enter' || e.ctrlKey) return;
+  e.preventDefault();
+  const text = entryCommentValue.value.trim();
+  if (!text) return;
+  entryCommentValue.value = '';
+  await submitEntry('comment', { text });
 });
 
 // trailStatusMap: "osm_type:osm_id" -> worst currently-active status string
@@ -1398,19 +1476,15 @@ document.getElementById('entry-form-submit').addEventListener('click', async () 
 // the highest-severity value across those latest-per-point results wins. This
 // matters because a recent 'clear' logged at one spot must not hide an older,
 // still-unresolved 'fully_blocked' logged somewhere else on the same trail.
-// trailHistorySet: same keys, but for *any* history entry (status, comment,
-// or image) — drives the "Show history" button in a trail's popup, since a
-// trail can have comments/images with no status entry at all (or a 'clear'
-// one) and still have something worth surfacing.
-// trailIdByKey: same keys -> trails.id, so the popup doesn't need a second
-// round trip to Supabase just to look up the id before fetching full history.
-// All three rebuilt from Supabase on login/logout and after each new entry;
-// the visible overlay (updateTrailStatusOverlay) is then recomputed against
+// trailIdByKey: same keys -> trails.id, so the trail popup's "Trail history"
+// button doesn't need a round trip to Supabase just to look up the id before
+// opening the panel (see openEntryForm).
+// Both rebuilt from Supabase on login/logout and after each new entry; the
+// visible overlay (updateTrailStatusOverlay) is then recomputed against
 // whatever's actually rendered, since Supabase only knows the OSM reference
 // for a trail, not its geometry.
 const STATUS_SEVERITY = { clear: 0, overgrown: 1, partially_blocked: 2, fully_blocked: 3 };
 const trailStatusMap = new Map();
-const trailHistorySet = new Set();
 const trailIdByKey = new Map();
 
 async function refreshTrailData() {
@@ -1420,7 +1494,6 @@ async function refreshTrailData() {
 
   if (!currentSession) {
     trailStatusMap.clear();
-    trailHistorySet.clear();
     trailIdByKey.clear();
     updateTrailStatusOverlay();
     pointsSource.setData({ type: 'FeatureCollection', features: [] });
@@ -1438,7 +1511,6 @@ async function refreshTrailData() {
   if (historyErr) console.error(historyErr);
 
   trailStatusMap.clear();
-  trailHistorySet.clear();
   trailIdByKey.clear();
   // pointKey -> latest status at that point (trail-level bucket if
   // location_id is null, otherwise that location) — historyRows is
@@ -1446,7 +1518,6 @@ async function refreshTrailData() {
   const latestPerPoint = new Map();
   for (const row of historyRows || []) {
     const key = `${row.trails.osm_type}:${row.trails.osm_id}`;
-    trailHistorySet.add(key);
     trailIdByKey.set(key, row.trails.id);
     if (row.entry_type === 'status') {
       const pointKey = `${key} ${row.location_id ?? ''}`;
@@ -1495,19 +1566,46 @@ async function refreshTrailData() {
   pointsSource.setData({ type: 'FeatureCollection', features });
 }
 
+// id -> { path, thumb_path } for every image entry currently rendered in the
+// history list — the delete/lightbox handlers below look paths up here
+// rather than round-tripping user-controlled filenames through an HTML
+// attribute: escapeHtml only escapes for *text* content (setting
+// .textContent then reading .innerHTML doesn't escape quote characters),
+// which is unsafe for attribute-value context — a filename containing a
+// `"` could break out of a data-* attribute otherwise.
+const historyEntryData = new Map();
+
 // Fetches every history entry for a trail (filterColumn='trail_id') or a point
 // location (filterColumn='location_id') and renders it as an HTML list, newest
-// first — used by both the trail popup's "Show history" button and every point
-// marker's popup (which always shows its full history, not just the latest
-// entry — a marker is a place things happen to over time, e.g. "tree fell here"
-// followed later by "cleared", not a single fixed state).
+// first — used by the unified history panel (openEntryForm/refreshEntryFormHistory)
+// for both a trail's full history and a single point's (a marker is a place
+// things happen to over time, e.g. "tree fell here" followed later by
+// "cleared", not a single fixed state).
+//
+// A status entry is "protected" (no delete button) exactly when it's the
+// *latest* status logged at its own point — the trail-level bucket, or a
+// specific location — and that status isn't 'clear': i.e. it's an active
+// problem report. Deleting it would silently make the trail look better than
+// it actually is, so that one specific case is excluded from an otherwise
+// fully deletable history. A superseded status entry, a 'clear' one, and
+// every comment/image, stay freely deletable.
 async function fetchHistoryHtml(filterColumn, filterValue) {
   const { data, error } = await sb.from('trail_history')
-    .select('id, entry_type, value, created_at')
+    .select('id, entry_type, value, created_at, location_id')
     .eq(filterColumn, filterValue)
     .order('created_at', { ascending: false });
   if (error) return '<div class="history-empty">Could not load history.</div>';
   if (!data.length) return '<div class="history-empty">No history yet.</div>';
+
+  const seenPointStatus = new Set();
+  const protectedIds = new Set();
+  for (const row of data) {
+    if (row.entry_type !== 'status') continue;
+    const pointKey = row.location_id ?? '';
+    if (seenPointStatus.has(pointKey)) continue;
+    seenPointStatus.add(pointKey);
+    if (row.value.status !== 'clear') protectedIds.add(row.id);
+  }
 
   const items = await Promise.all(data.map(async row => {
     const when = new Date(row.created_at).toLocaleString();
@@ -1517,18 +1615,71 @@ async function fetchHistoryHtml(filterColumn, filterValue) {
     } else if (row.entry_type === 'comment') {
       body = escapeHtml(row.value.text);
     } else if (row.entry_type === 'image') {
+      historyEntryData.set(row.id, { path: row.value.path, thumb_path: row.value.thumb_path || null });
       const { data: signed, error: signErr } =
-        await sb.storage.from('trail-images').createSignedUrl(row.value.path, 300);
+        await sb.storage.from('trail-images').createSignedUrl(row.value.thumb_path || row.value.path, 300);
       body = signErr
         ? '<em>Could not load image</em>'
-        : `<img src="${signed.signedUrl}" style="max-width:200px;display:block;border-radius:4px">`;
+        : `<img src="${signed.signedUrl}" class="history-thumb" data-entry-id="${row.id}">`;
     } else {
       body = escapeHtml(JSON.stringify(row.value));
     }
-    return `<li>${body}<br><small>${when}</small></li>`;
+
+    const isProtected = row.entry_type === 'status' && protectedIds.has(row.id);
+    const deleteHtml = isProtected ? ''
+      : `<button class="history-delete" data-entry-id="${row.id}" title="Delete this entry">✕</button>`;
+    return `<li>${body}<br><small>${when}</small>${deleteHtml}</li>`;
   }));
   return `<ul class="history-list">${items.join('')}</ul>`;
 }
+
+const imageLightboxWrap = document.getElementById('image-lightbox-wrap');
+const imageLightboxImg  = document.getElementById('image-lightbox-img');
+imageLightboxWrap.addEventListener('click', () => {
+  imageLightboxWrap.style.display = 'none';
+  imageLightboxImg.src = '';
+});
+
+async function openImageLightbox(path) {
+  const { data: signed, error } = await sb.storage.from('trail-images').createSignedUrl(path, 300);
+  if (error) return;
+  imageLightboxImg.src = signed.signedUrl;
+  imageLightboxWrap.style.display = 'flex';
+}
+
+// Delegated (history list content is re-rendered wholesale on every refresh,
+// so binding to individual elements would mean rebinding every time) click
+// handling for both the thumbnail-opens-lightbox and delete-entry actions.
+document.addEventListener('click', async e => {
+  const thumb = e.target.closest('.history-thumb');
+  if (thumb) {
+    const entry = historyEntryData.get(thumb.dataset.entryId);
+    if (entry) openImageLightbox(entry.path);
+    return;
+  }
+
+  const delBtn = e.target.closest('.history-delete');
+  if (!delBtn) return;
+  if (!confirm('Delete this entry? This cannot be undone.')) return;
+  const entryId = delBtn.dataset.entryId;
+  try {
+    const { error } = await sb.from('trail_history').delete().eq('id', entryId);
+    if (error) throw error;
+  } catch (err) {
+    alert(`Could not delete: ${err.message}`);
+    return;
+  }
+  const imageData = historyEntryData.get(entryId);
+  if (imageData) {
+    const paths = [imageData.path, imageData.thumb_path].filter(Boolean);
+    if (paths.length) {
+      const { error: rmErr } = await sb.storage.from('trail-images').remove(paths);
+      if (rmErr) console.error('Could not remove storage object(s) for deleted entry', rmErr);
+    }
+  }
+  await refreshEntryFormHistory();
+  refreshTrailData();
+});
 
 // Supabase only stores the OSM reference (osm_type/osm_id), not geometry, so
 // the colored overlay has to be rebuilt from whatever's currently rendered —
@@ -1567,49 +1718,41 @@ map.on('sourcedata', e => {
   if (e.sourceId === 'osmvec' && e.isSourceLoaded) updateTrailStatusOverlay();
 });
 
-// Point-located history entries — click a marker to see its *full* history
-// (not just the latest entry, e.g. "tree fell here" followed later by
-// "cleared" — see supabase/migrations/0004_locations.sql), and, if logged in,
-// add another entry at the same spot.
+// Point-located history entries — click a marker to open the same unified
+// view+add panel as a trail (see openEntryForm), scoped to this point's own
+// history rather than the whole trail's (a marker is a place things happen
+// to over time, e.g. "tree fell here" followed later by "cleared", not a
+// single fixed state).
 let historyPointPopup = null;
-map.on('click', 'history-points', async e => {
+map.on('click', 'history-points', e => {
   const f = e.features[0];
   const props = f.properties;
   const [lng, lat] = f.geometry.coordinates;
 
-  if (historyPointPopup) historyPointPopup.remove();
-  historyPointPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '260px' })
-    .setLngLat([lng, lat])
-    .setHTML('<strong>Location history</strong><div class="history-empty">Loading…</div>')
-    .addTo(map);
+  if (historyPointPopup) { historyPointPopup.remove(); historyPointPopup = null; }
 
-  const historyHtml = await fetchHistoryHtml('location_id', props.location_id);
-  const addHereHtml = currentSession
-    ? '<div class="popup-trail-actions"><button id="popup-add-here">Add entry here</button></div>'
-    : '';
-  // Popup may have been closed/replaced while the fetch above was in flight
-  // (e.g. the user clicked elsewhere) — don't resurrect a stale one.
-  if (historyPointPopup && historyPointPopup.isOpen()) {
-    historyPointPopup.setHTML(`<strong>Location history</strong>${historyHtml}${addHereHtml}`);
+  // RLS blocks anonymous reads entirely (mtb-editor/CLAUDE.md) — nothing
+  // real to show, so just point at logging in rather than opening a panel
+  // that can only ever say "no history".
+  if (!currentSession) {
+    historyPointPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '220px' })
+      .setLngLat([lng, lat])
+      .setHTML('<div class="popup-trail-hint">Log in to view/add history</div>')
+      .addTo(map);
+    return;
   }
 
-  if (currentSession && historyPointPopup && historyPointPopup.isOpen()) {
-    const addHereBtn = historyPointPopup.getElement().querySelector('#popup-add-here');
-    if (addHereBtn) addHereBtn.addEventListener('click', () => {
-      historyPointPopup.remove();
-      // trailId/locationId already known (this marker's own values, trailId
-      // possibly null for a point not linked to any trail) — skips
-      // ensureTrailRow and find_or_create_location entirely, so this can
-      // never end up creating a duplicate trail or snapping to a different
-      // nearby location.
-      openEntryForm({
-        trailId: props.trail_id || null,
-        locationId: props.location_id,
-        label: 'This location',
-        location: { lng, lat },
-      });
-    });
-  }
+  // trailId/locationId already known (this marker's own values, trailId
+  // possibly null for a point not linked to any trail) — skips
+  // ensureTrailRow and find_or_create_location entirely, so this can never
+  // end up creating a duplicate trail or snapping to a different nearby
+  // location.
+  openEntryForm({
+    trailId: props.trail_id || null,
+    locationId: props.location_id,
+    label: 'This location',
+    location: { lng, lat },
+  });
 });
 map.on('mouseenter', 'history-points', () => { map.getCanvas().style.cursor = 'pointer'; });
 map.on('mouseleave', 'history-points', () => { map.getCanvas().style.cursor = ''; });
