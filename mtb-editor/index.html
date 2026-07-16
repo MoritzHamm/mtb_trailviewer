@@ -517,12 +517,17 @@ const map = new maplibregl.Map({
           'line-blur': VIEWER_STYLE.selection.coreBlur,
         },
       },
-      // Trail status halo (Supabase trail_history status, 'clear' filtered out
-      // client-side before this source is populated — see updateTrailStatusOverlay())
+      // Trail status halo (Supabase trail_history status) — a trail with zero
+      // status history gets no overlay at all ("not updated"), filtered out
+      // client-side before this source is populated (see updateTrailStatusOverlay()).
+      // A trail whose worst/latest status is 'clear' still gets an overlay
+      // (green) — a *confirmed* clear report should read differently from a
+      // trail nobody's ever reported on.
       { id: 'trail-status-overlay', type: 'line', source: 'trail-status',
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
           'line-color': ['match', ['get', 'status'],
+            'clear',              VIEWER_STYLE.trailStatus.clear,
             'overgrown',         VIEWER_STYLE.trailStatus.overgrown,
             'partially_blocked', VIEWER_STYLE.trailStatus.partially_blocked,
             'fully_blocked',     VIEWER_STYLE.trailStatus.fully_blocked,
@@ -534,7 +539,7 @@ const map = new maplibregl.Map({
         },
       },
       // Trail view mode: wide/blurred status glow for every qualifying trail
-      // with a non-clear worst status (reuses the 'trail-status' source built by
+      // with *any* status history (reuses the 'trail-status' source built by
       // updateTrailStatusOverlay() — same data as trail-status-overlay above,
       // just styled as a glow). Hidden until trail view mode is on; filtered at
       // runtime to exclude whichever trail is currently selected, since that one
@@ -543,6 +548,7 @@ const map = new maplibregl.Map({
         layout: { visibility: 'none', 'line-join': 'round', 'line-cap': 'round' },
         paint: {
           'line-color': ['match', ['get', 'status'],
+            'clear',              VIEWER_STYLE.trailStatus.clear,
             'overgrown',         VIEWER_STYLE.trailStatus.overgrown,
             'partially_blocked', VIEWER_STYLE.trailStatus.partially_blocked,
             'fully_blocked',     VIEWER_STYLE.trailStatus.fully_blocked,
@@ -1172,9 +1178,11 @@ map.on('click', e => {
     map.getSource('trail-view-pulse').setData({ type: 'FeatureCollection', features: fragmentFeatures });
     const key = `${identity.osm_type}:${identity.osm_id}`;
     map.setFilter('trail-view-glow', ['!=', ['get', 'identity_key'], key]);
+    // trailStatusMap only has an entry once the trail has *some* status
+    // history (including 'clear') — genuinely never-updated trails fall
+    // through to the yellow "no info" pulse.
     const worst = trailStatusMap.get(key);
-    const severity = STATUS_SEVERITY[worst] || 0;
-    const pulseColor = severity > 0 ? VIEWER_STYLE.trailStatus[worst] : VIEWER_STYLE.trailView.noInfoPulseColor;
+    const pulseColor = worst ? VIEWER_STYLE.trailStatus[worst] : VIEWER_STYLE.trailView.noInfoPulseColor;
     startPulse(pulseColor);
   } else {
     map.getSource('trail-view-pulse').setData({ type: 'FeatureCollection', features: [] });
@@ -1504,7 +1512,12 @@ async function fetchHistoryHtml(filterColumn, filterValue) {
 // Supabase only stores the OSM reference (osm_type/osm_id), not geometry, so
 // the colored overlay has to be rebuilt from whatever's currently rendered —
 // same technique as the selection highlight's multi-fragment matching above.
-// 'clear' status (or no status at all) means no overlay line for that trail.
+// No status history at all means no overlay line ("not updated") — but a
+// trail whose worst/latest status *is* 'clear' still gets one (green), since
+// a confirmed-clear report should read differently from never having been
+// checked. (Future refinement: age out old reports — e.g. after a storm,
+// only reports logged since the storm should count as "updated" and
+// everything older should fall back to "not updated" — not built yet.)
 function updateTrailStatusOverlay() {
   const src = map.getSource('trail-status');
   if (!src) return;
@@ -1518,7 +1531,7 @@ function updateTrailStatusOverlay() {
     if (!identity) continue;
     const key = `${identity.osm_type}:${identity.osm_id}`;
     const trailStatus = trailStatusMap.get(key);
-    if (!trailStatus || trailStatus === 'clear') continue;
+    if (!trailStatus) continue;
     // identity_key lets trail-view-glow (index.html style layers) filter out
     // whichever trail is currently selected/pulsing, since that one owns its
     // own glow via trail-view-pulse-glow instead of the static one here.

@@ -95,9 +95,12 @@ const VIEWER_STYLE = {
   },
 
   // Trail status overlay (Supabase trail_history, entry_type='status') — drawn as a
-  // colored line under the trail itself, only for non-clear statuses (a clear trail
-  // just looks like a normal trail, no overlay needed).
+  // colored line under the trail itself. 'clear' gets its own (green) overlay
+  // rather than no overlay — a trail with a *confirmed* clear report should read
+  // differently from a trail with no report at all (see updateTrailStatusOverlay()
+  // in index.html: only a trail with zero status history gets no overlay).
   trailStatus: {
+    clear:               '#4caf50',
     overgrown:          '#e0b400',
     partially_blocked:  '#e0791e',
     fully_blocked:      '#d43d3d',
