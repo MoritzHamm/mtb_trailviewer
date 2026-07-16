@@ -81,7 +81,18 @@ class RouteRelationCollector(osmium.SimpleHandler):
     single streaming pass can't attach a route's name to its member ways as
     it goes — the ways are already emitted by the time relation() would fire.
     This builds way_id -> (route_type, name, relation_id) up front so the
-    second pass (OSMHandler.way, below) can just look it up."""
+    second pass (OSMHandler.way, below) can just look it up.
+
+    KNOWN LIMITATION: only one relation is kept per way (the highest-priority
+    ROUTE_TYPE_PRIORITY match; ties keep whichever relation() call happened
+    first). A way that's a member of two *same-priority* relations (e.g. two
+    distinct route=mtb loops sharing a trunk segment) silently loses the
+    second one here — mtb-editor's "pick which trail" UI for that case
+    (see getTrailIdentity() in mtb-editor/index.html) can't be built until
+    this collects a *list* of route memberships per way instead of one, and
+    that list gets propagated through to the vector tiles (likely a
+    JSON-encoded property, since MVT properties are flat scalars) — deferred
+    until it's actually needed, see mtb-editor/CLAUDE.md's known gaps."""
     def __init__(self):
         super().__init__()
         self.way_route: dict[int, tuple[str, str, int]] = {}

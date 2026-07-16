@@ -1005,7 +1005,18 @@ function featureLabel(props) {
 // a way qualifies via mtb:name or mtb:scale; a relation qualifies via route=mtb
 // alone (it doesn't need its own mtb:name/mtb:scale — those live on the member
 // ways, or nowhere at all). A relation's route groups multiple way segments
-// into one trail identity, so prefer it over the individual way when present.
+// into one trail identity, so prefer it over the individual way when present
+// — this is a deliberate priority rule (a clicked/annotated segment that's
+// part of a named route should resolve to that route, not its own bare way
+// identity), not just a fallback.
+//
+// NOT HANDLED: a way that's a member of *multiple* same-priority route=mtb
+// relations only ever sees one of them here, because the pipeline itself
+// only records one relation per way (see RouteRelationCollector in
+// foundation/extract_osm.py — deliberately not fixed there yet either). Once
+// that's fixed to carry a list, clicking such a way should show a picker
+// (trail name/length/scale per candidate) instead of silently picking one —
+// there's no data to pick between yet, so no picker UI exists here.
 function getTrailIdentity(props) {
   if (props.route_type === 'mtb' && props.route_relation_id != null) {
     return { osm_type: 'relation', osm_id: props.route_relation_id };
@@ -1163,9 +1174,19 @@ map.on('click', e => {
   // just the one under the cursor, or the glow looks like several unrelated
   // segments instead of one trail. Querying with no geometry arg searches the
   // whole current viewport rather than a single point/box.
-  const fragments = osmId != null
-    ? map.queryRenderedFeatures(undefined, { layers }).filter(ff => ff.properties.osm_id === osmId)
-    : [f];
+  // When the clicked feature qualifies as a trail (identity != null), match by
+  // trail identity rather than raw osm_id — a route relation's trail spans
+  // multiple distinct ways (each with their own osm_id) grouped only by
+  // route_relation_id, so an osm_id-only match would miss every other way in
+  // the route and only highlight/pulse the one segment actually clicked.
+  const fragments = identity
+    ? map.queryRenderedFeatures(undefined, { layers }).filter(ff => {
+        const fid = getTrailIdentity(ff.properties);
+        return fid && fid.osm_type === identity.osm_type && fid.osm_id === identity.osm_id;
+      })
+    : osmId != null
+      ? map.queryRenderedFeatures(undefined, { layers }).filter(ff => ff.properties.osm_id === osmId)
+      : [f];
   const fragmentFeatures = fragments.map(ff => ({ type: 'Feature', geometry: ff.geometry, properties: {} }));
 
   // In trail view mode, a qualifying trail's selection indicator is its own

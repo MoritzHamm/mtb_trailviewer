@@ -255,6 +255,20 @@ their own neutral colors.
 - `find_or_create_location`'s 15m snap radius is a guess, not tuned against real usage
   — if entries meant to be separate keep merging (or ones meant to be the same keep
   splitting), that's the number to revisit.
+- A way that belongs to *multiple* same-priority `route=mtb` relations only ever sees
+  one of them — `RouteRelationCollector` (`foundation/extract_osm.py`) keeps a single
+  `way_id -> relation` mapping, so the second membership is silently dropped at
+  extraction time, before it ever reaches the frontend. `getTrailIdentity()`
+  (`index.html`) already prioritizes a relation over the clicked way's own identity
+  when one relation is present — the not-yet-built part is presenting a picker
+  (trail name/length/scale) when a way has *more than one* candidate relation, which
+  needs the pipeline change first (list-valued route memberships, propagated through
+  the vector tiles). Deferred until it's actually needed with real multi-route data —
+  see the comments at both locations above.
+- Trail history logged against a way's own identity *before* that way was added to a
+  route relation becomes orphaned once `getTrailIdentity()` starts resolving it to the
+  relation instead — the old entries just stop showing up anywhere. Not handled
+  (acceptable for now since the Supabase project gets wiped before any real deployment).
 
 ## Future work (not built yet)
 
