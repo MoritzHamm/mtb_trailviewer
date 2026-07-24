@@ -28,31 +28,45 @@ Key differences from `mtb-editor` (do not copy its patterns uncritically):
 
 ## Data model (see `DATA.md`)
 
-Core concepts, first drafted 2026-07-24:
+Core concepts, first drafted 2026-07-24, revised same day after a second DATA.md pass:
 - **Adventure** — a self-contained game session/dataset. Carries filterable metadata
   (age rating etc.). Adventures don't reference each other's scene/trigger data
   (persistent stats are the one intentional exception — see Stats below).
-- **Scene** — has a locality on the map (point, line, or polygon), and two orthogonal
-  states: *visibility* (shown on map) and *activation* (will trigger for the player).
-  Gameplay type varies (reach-location, puzzle, fight, AR minigame, motion-based
-  challenge like flee or red-light/green-light). Completion isn't just a boolean — it
-  can carry an outcome value (e.g. which faction's quest branch got taken).
+- **Scene** — two orthogonal states, *visibility* (shown on map) and *activation*
+  (live, will run its gameplay logic). Locality (point/line/polygon) is **not**
+  intrinsic to a scene — it's optional, expressed as a location-type parameter like
+  any other exported setting, so plenty of scenes (a fight or puzzle activated by
+  another scene) have none. Completion isn't just a boolean — it can carry an outcome
+  value (e.g. which faction's quest branch got taken).
+- **Scene types & components are data-driven, not hardcoded.** A scene type exports a
+  typed parameter list (name, type, description, default value): location
+  (point/line/polygon), flags/numbers (int/float), display strings, images/image
+  sequences/video, structs/arrays of the above, or — the escape hatch for genuinely
+  complex cases like a puzzle minigame's level layout — a reference to a dedicated,
+  hand-written editor class. The generic editor assembles a form from this schema
+  automatically; bespoke editor code is only written for that last case, and only once
+  actually needed. **Components** work the same way and are **freely composable** — an
+  admin can attach any component to any scene instance, components aren't fixed by
+  scene type.
 - **Stats** — a set of session-scoped stats (start value, adjusted by player actions,
   multiplies end-of-adventure rewards) and a set of persistent cross-adventure stats
   (coins, reputation). Catalog model (global fixed vs per-adventure freeform) not yet
   decided — see Open questions.
 - Deferred, not needed for v1: NPC dialog trees, coop play settings.
+- Also in `DATA.md` but out of editor scope: a runtime execution model for the Unity
+  app itself (immediate-mode-style per-frame scene/component logic driving the map,
+  quest log, and gameplay screens). Useful forward context, not editor work.
 
 ## Design decisions made so far
 
 - **Spatial triggering**: GPS is noisy, so don't try to solve precision at the
-  geofence level. A scene's locality trigger is a *loose* proximity check — good
-  enough to reveal the scene's gameplay. Correctness of "are you actually at the
-  target" is enforced separately, by a presence-verification mechanic chosen per
-  scene: scanning a QR code, answering a question only answerable on-site ("what
-  color is the marking on the rock at the hilltop"), or (later, side-project) matching
-  a photo against a pre-recorded reference. This decouples geofence-radius tuning from
-  gameplay correctness.
+  geofence level. Where a scene does declare a location parameter, it's a *loose*
+  proximity check — good enough to reveal the scene's gameplay. Correctness of "are
+  you actually at the target" is enforced separately, by a presence-verification
+  mechanic chosen per scene: scanning a QR code, answering a question only answerable
+  on-site ("what color is the marking on the rock at the hilltop"), or (later,
+  side-project) matching a photo against a pre-recorded reference. This decouples
+  geofence-radius tuning from gameplay correctness.
 - **Conditions/rules engine deferred**: cross-scene boolean conditions (AND of
   multiple scenes' completion, outcome-dependent branching) are *not* a first-level
   concept yet. Start with unconditional scene chaining — on scene completion, flip
@@ -60,10 +74,9 @@ Core concepts, first drafted 2026-07-24:
   unconditional chaining has been used in practice and its limits are clear.
 - **Capability manifest is a standalone document, not a Unity export**: neither the
   editor nor Unity is authoritative over the other. Both read the same central spec
-  document, which declares what scene types are supported. Basic/generic scene types
-  need zero bespoke editor code — their config is rendered generically from the
-  manifest. Only complex scene types (e.g. a bespoke puzzle minigame) get concrete,
-  hand-written editor implementation, and only once they're actually needed.
+  document, which declares the supported scene/component types and their parameter
+  schemas (see above). Basic/generic types need zero bespoke editor code; only complex
+  ones get concrete, hand-written editor implementation, and only once needed.
 
 ## Not yet decided
 
@@ -79,5 +92,7 @@ Core concepts, first drafted 2026-07-24:
 
 ## Status
 
-`DATA.md` has a first pass at the core data model (adventure/scene/stats). The
-capability manifest document is being drafted next. No code, no Supabase schema yet.
+`DATA.md` has a first pass at the core data model (adventure/scene/stats) plus a
+data-driven scene/component type system (typed parameter export, freely composable
+components). The capability manifest document is being drafted next. No code, no
+Supabase schema yet.
