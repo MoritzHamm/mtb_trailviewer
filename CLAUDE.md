@@ -145,11 +145,13 @@ export artifacts instead:
   slimmed-down static map render). Supabase is the authoritative store for trail
   status/comments/route data; OSM integration lets the editor write trail edits back.
   A "local trail maintainer group" can collaborate — not relevant for the game side.
-- **Game editor:** players get a Unity-importable "level" package, built from a
-  capability manifest exported *from* Unity (what enemy/item/minigame types exist) so
-  the editor knows what it's allowed to place. Supabase is the authoritative data
-  store there too (a separate project from MTB's, for clean RLS/access separation);
-  the Unity package is always a derived export, never hand-edited.
+- **Game editor:** players get a Unity-importable "level" package, built against a
+  capability manifest — a standalone spec document (not exported from either side)
+  that both the editor and Unity read, declaring what scene types/content exist, so
+  the editor knows what it's allowed to place. Neither app is authoritative over the
+  other for this. Supabase is the authoritative data store there too (a separate
+  project from MTB's, for clean RLS/access separation); the Unity package is always a
+  derived export, never hand-edited. See `game-editor/CLAUDE.md` for detail.
 
 Both share the same underlying geospatial data (terrain, OSM trails/POIs) from
 `foundation/`, which is why the repo stays a monorepo rather than splitting.
