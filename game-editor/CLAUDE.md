@@ -38,16 +38,18 @@ Core concepts, first drafted 2026-07-24, revised same day after a second DATA.md
   any other exported setting, so plenty of scenes (a fight or puzzle activated by
   another scene) have none. Completion isn't just a boolean — it can carry an outcome
   value (e.g. which faction's quest branch got taken).
-- **Scene types & components are data-driven, not hardcoded.** A scene type exports a
-  typed parameter list (name, type, description, default value): location
-  (point/line/polygon), flags/numbers (int/float), display strings, images/image
-  sequences/video, structs/arrays of the above, or — the escape hatch for genuinely
-  complex cases like a puzzle minigame's level layout — a reference to a dedicated,
-  hand-written editor class. The generic editor assembles a form from this schema
-  automatically; bespoke editor code is only written for that last case, and only once
-  actually needed. **Components** work the same way and are **freely composable** — an
-  admin can attach any component to any scene instance, components aren't fixed by
-  scene type.
+- **Scene types are data-driven, not hardcoded.** A scene type exports a typed
+  parameter list (name, type, description, default value): location (point/line/
+  polygon), flags/numbers (int/float), display strings, images/image sequences/video,
+  structs/arrays of the above, or — the escape hatch for genuinely complex cases like
+  a puzzle minigame's level layout — a reference to a dedicated, hand-written editor
+  class. The generic editor assembles a form from this schema automatically; bespoke
+  editor code is only written for that last case, and only once actually needed.
+- **No separate component layer** (dropped 2026-07-25): a component needing implicit
+  access to its owning scene's data (e.g. a map-marker display needing the scene's
+  location, which isn't guaranteed to exist) created hidden coupling. Behavior that
+  would've been a component is instead just its own scene type, chained via events —
+  see Event flow editor below for why that's still tractable.
 - **Stats** — a set of session-scoped stats (start value, adjusted by player actions,
   multiplies end-of-adventure rewards) and a set of persistent cross-adventure stats
   (coins, reputation). Catalog model (global fixed vs per-adventure freeform) not yet
@@ -74,9 +76,18 @@ Core concepts, first drafted 2026-07-24, revised same day after a second DATA.md
   unconditional chaining has been used in practice and its limits are clear.
 - **Capability manifest is a standalone document, not a Unity export**: neither the
   editor nor Unity is authoritative over the other. Both read the same central spec
-  document, which declares the supported scene/component types and their parameter
-  schemas (see above). Basic/generic types need zero bespoke editor code; only complex
-  ones get concrete, hand-written editor implementation, and only once needed.
+  document, which declares the supported scene types and their parameter schemas (see
+  above). Basic/generic types need zero bespoke editor code; only complex ones get
+  concrete, hand-written editor implementation, and only once needed.
+- **Event flow editor is a first-class, early piece of the plan**, not a later nicety.
+  Dropping components means more, finer-grained scenes for equivalent behavior, so a
+  graphical node-graph view (scenes as nodes, "on complete" as edges) is needed to
+  keep adventures navigable as scene count grows. This is tractable precisely because
+  chaining is unconditional simple edges (see above) — a directed graph, not general
+  visual scripting/execution logic like Unreal Blueprint. Buildable with an off-the-
+  shelf node-graph library (e.g. React Flow) reading/writing the same scene records
+  the rest of the editor uses; gets meaningfully harder only if/when conditions are
+  reintroduced (would need real execution pins, branch/AND/OR nodes).
 
 ## Not yet decided
 

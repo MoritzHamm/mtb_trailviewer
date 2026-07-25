@@ -26,11 +26,17 @@ Every scene type exports a number of settings that are to be configured by the i
 
 A scene type would export the parameter it supports, giving their name, type, description and if/what default value they have. To configure the scene in the adventure, an editor would be assembled for these types. Spatial types require a map, others just an input field, and the specific configuration would require a editor class that is used to author it.
 
-The same is true for scene components. There will be component types, and they will also export their settings.
+No separate component layer: a component needing implicit access to its owning scene's data (e.g. a map-marker display needing the scene's location, which isn't guaranteed to exist) created hidden coupling that wasn't worth it. Behavior that would have been a component is instead just its own scene type, chained via events rather than attached. This means more, finer-grained scenes for the same effect than a component model would need — see Event Flow below for how that's kept navigable.
 
-Finally, a scene or scene component type will have an underlying class that runs the logic during gameplay. Once the scene activates, it will run frequently, and be given a context of what the user does spatially. It will then determine what to render on screen and in the various layers of UI (map screen etc.) as well as what states are changed, including its own. E.g., a trigger scene will just watch the player's position and set itself to completed once the user moves into the trigger. It could have a component that registers a polygon to the map screen and pushes a "go to this location" entry to the quest log. This indicates that using immediate mode for these systems will be beneficial - as long as the request is pushed every frame, we show it, and it will automatically disappear once the scene is completed.
+Finally, a scene type will have an underlying class that runs the logic during gameplay. Once the scene activates, it will run frequently, and be given a context of what the user does spatially. It will then determine what to render on screen and in the various layers of UI (map screen etc.) as well as what states are changed, including its own. E.g., a trigger scene will just watch the player's position and set itself to completed once the user moves into the trigger, which then activates a scene that registers a marker on the map screen and another that pushes a "go to this location" entry to the quest log. This indicates that using immediate mode for these systems will be beneficial - as long as the request is pushed every frame, we show it, and it will automatically disappear once the scene is completed.
 
 A mini-game will actually render to the screen; an AR scene will request AR mode and configure it. If immediate mode is the right choice here remains to be seen, but we should strive to keep this consistent.
+
+## Event Flow
+
+Scenes link to each other only through simple "on complete" edges: when a scene completes, it activates/deactivates/shows/hides one or more named scenes. No conditional logic (AND/OR across scenes, outcome-branching) is a first-level concept yet — see the open question in `CLAUDE.md`.
+
+Since components are gone, the same behavior that a component model would have kept inside one scene is now spread across more, smaller scenes connected by these edges. Keeping that navigable needs a graphical editor showing event flow between scenes as a node graph (scenes as nodes, "on complete" as edges) — similar in spirit to Unreal Blueprint's node graph, but scoped to this simple message-passing only, not general visual scripting/logic.
 
 # Game Systems
 
