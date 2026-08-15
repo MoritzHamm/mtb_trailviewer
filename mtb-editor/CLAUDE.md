@@ -270,12 +270,122 @@ their own neutral colors.
   relation instead — the old entries just stop showing up anywhere. Not handled
   (acceptable for now since the Supabase project gets wiped before any real deployment).
 
+## Projects & Tracks (FIT import, trail planning, shareable projects)
+
+A separate planning/staging layer, distinct from the OSM-annotation feature above —
+lives in `tracks.js` (kept out of `index.html`'s already-~2000-line inline script) plus
+`supabase/migrations/0005_projects_and_tracks.sql`. Built for a concrete workflow:
+import a `.fit` file of a scouting walk, cut it into chunks, clean each chunk up,
+attach photos/comments, and send a link to a friend to review — without them needing
+an account. **Supersedes** the unfinished `trails.is_draft`/`draft_geometry` flow
+(above) as the intended path for planning new trails; those columns are untouched but
+no longer where new planning work should go. OSM stays authoritative for real trails —
+nothing here writes to OSM automatically.
+
+**Schema:** `projects` (a project's own `id` **is** its share-link capability token —
+no separate token column, same "unguessable id is the credential" idea as signed image
+URLs) → `tracks` (`geom` is the current/working geometry; `raw_points` is the
+*immutable* original FIT-imported slice, `[{lat,lng,ele,time}, ...]`, untouched by
+simplify/edit) → `track_history` (comment/image entries, same free-form type/value
+shape as `trail_history`, but `created_by` is nullable and there's an `author_name` for
+anonymous commenters).
+
+**Access model:** authenticated users get full table access (same "small trusted
+group, fully open" RLS as `trails`/`trail_history`). Anonymous share-link visitors
+never get table grants — they go through `security definer` RPCs instead
+(`get_public_project`, `get_public_tracks`, `get_public_track_history`,
+`get_public_track_locations`, `get_public_project_locations`,
+`find_or_create_track_location`, `add_track_comment`), the last of which is the
+**only** anonymous write path anywhere in this schema. `tracks.js` always reads
+through these RPCs (works identically logged in or not) and only uses direct table
+calls for authenticated-only mutations (create/rename/delete, geometry edits, marking
+exported, photo upload). Track photos live in a **public** bucket (`track-images`,
+unlike the private `trail-images`) so anon viewers don't need a signed-URL round trip —
+anon photo *upload* isn't supported (scope call, easy to revisit): friends can comment
+with text, not photos, without an account.
+
+**Point comments/photos (`track_locations`, `supabase/migrations/
+0006_track_locations.sql`):** mirrors trails' `locations`/`trail_history.location_id`
+design (a comment/photo can be tied to a specific spot, not just "the trail" as a
+whole) but as a **separate** table from the trail-side `locations` — that one's RLS is
+deliberately authenticated-only, and track comments need anonymous authorship, so
+sharing it would have meant widening what the trail-annotation feature exposes.
+`track_history.location_id` null is the whole-track thread (opened via the track
+editor's "Comments" button); a `track_locations` id is a specific point's thread,
+opened by clicking the track's line on the map, clicking an existing point marker
+(`track-history-points` layer), or a bulk-matched photo (below).
+`find_or_create_track_location` (unlike trails' `find_or_create_location`) is granted
+to `anon` too, since clicking a track to leave a comment is exactly the
+anonymous-visitor flow this feature exists for.
+
+**Bulk photo upload matched by EXIF timestamp:** `tracks.js` hand-rolls a minimal JPEG
+EXIF reader (`findExifDateTimeOriginal`) rather than pulling in a library — same
+reasoning as the FIT parser. Walks JPEG segments to the APP1/Exif block, then the
+TIFF/IFD structure, preferring the Exif sub-IFD's `DateTimeOriginal` over IFD0's plain
+`DateTime`. Each photo's timestamp is matched to the nearest `raw_points[].time` on the
+track (only meaningful for `fit_upload` tracks — manual tracks have no recorded times,
+so bulk-uploaded photos there always attach to the whole track); beyond
+`BULK_PHOTO_MAX_DELTA_MS` (2 hours) a photo counts as unmatched rather than guessed.
+**EXIF `DateTimeOriginal` carries no timezone** — the matcher treats the raw clock
+reading as UTC and applies a user-adjustable "camera clock offset from UTC" (hours) to
+correct it; a systematic mismatch across every photo in the preview list is the tell
+that the offset needs adjusting, not that matching is broken. Only reads standard,
+uncompressed TIFF-in-JPEG Exif (no HEIC, no maker notes, no orientation handling).
+
+**FIT parsing is hand-rolled** (`tracks.js`, no CDN library) — deliberately, to avoid
+gambling on an unverified browser/UMD build of a third-party parser. Handles standard
+(non-compressed) record headers and the base types used by position/altitude/timestamp
+fields; developer-data fields are skipped (bytes still consumed correctly, so the
+stream doesn't desync) but not decoded. **Does not** handle compressed-timestamp FIT
+headers (rare in consumer GPS exports) — such a file fails with a clear error rather
+than silently producing wrong points. Semicircle→degree and altitude scale/offset
+formulas are the standard FIT SDK ones; not verified against a real device file yet
+(no sample `.fit` existed in the repo when this was built) — first real import is worth
+double-checking against a known route.
+
+**Point editing** is hand-rolled too (draggable `maplibregl.Marker` per vertex,
+dblclick to delete, click the line to insert) rather than a drawing library like
+`mapbox-gl-draw` — same reasoning (no unverified-compatibility dependency). Practical
+for tens of points (i.e. after simplifying); not meant for editing a raw multi-hundred-
+point FIT chunk directly.
+
+**Point reduction** is a hand-rolled Ramer–Douglas–Peucker implementation operating on
+point *indices* (not reconstructed coordinates), so simplified points are always exact
+originals. Tolerance is in metres, via a flat equirectangular approximation (same trick
+as the slope-shader math above) — fine at single-trail scale, not geodesically exact.
+
+**Export** is GPX-only (client-side XML generation) plus a suggested-OSM-tags text
+blob — no OSM API write-back, matching the "generate exportable data, upload manually
+via JOSM/iD" scope decision.
+
+**Known gaps / not built yet:**
+- Manual-draw and edit-points map clicks are registered independently of the existing
+  OSM-feature click handler in `index.html` — while either mode is active, a stray
+  feature popup can still open underneath. Not suppressed (would require exposing
+  `index.html`'s `featurePopup` as a global); low-impact, just a minor rough edge.
+- No per-project ownership/RLS — any authenticated user can edit any project, same
+  "small trusted group" model as trails.
+- No UI for browsing *all* public projects — you need the exact link.
+- Anonymous comment posting has no rate-limiting/abuse protection beyond the 2000-char
+  cap in `add_track_comment`.
+- No UI to rename/merge/delete a `track_location` once created (e.g. two nearby clicks
+  that should've snapped together but landed just past the 15m radius) — they
+  accumulate silently; cascade-deletes with their track, nothing else. Deleting every
+  comment/photo at a location does **not** delete the now-empty location row itself
+  (same as trails' `locations` — a marker can outlive its history), so an emptied
+  point marker stays on the map with an empty thread.
+- Comment/photo deletion is authenticated-only (moderation by the trusted maintainer
+  group, mirroring trails) — an anonymous visitor can't delete even their own comment,
+  since there's no account to prove ownership with.
+- Bulk photo EXIF matching has no manual override in the preview list beyond the
+  offset-hours field — an individual photo that matched to the wrong point can't be
+  reassigned or excluded before upload without changing the offset for the whole batch.
+
 ## Future work (not built yet)
 
-- Frontend Supabase integration: supabase-js, login UI, editor UI for adding/viewing
-  history entries, trail list view
 - OSM write-back integration for creating/editing trails from the app (feeds the
-  `is_draft` reconciliation flow above)
+  `is_draft` reconciliation flow above) — Projects/Tracks' GPX export is the
+  manual-upload stopgap for this
 - Route planning UI (admin assembles a route) + GPX/FIT export + a route-description
   render for participants
 - "Local trail maintainer group" collaboration model

@@ -133,4 +133,20 @@ const VIEWER_STYLE = {
     noInfoPulseColor: '#ffe14d',
     pulse: { periodMs: 1400, opacityMin: 0.35, opacityMax: 0.95, widthMin: 8, widthMax: 16 },
   },
+
+  // Projects/tracks (see tracks.js) — a planning/staging layer distinct from OSM
+  // trails, so it's styled distinctly too: dashed lines (nothing here is "real"
+  // yet) in colors that don't collide with trailStatus/osm.path's mtb:scale ramp.
+  tracks: {
+    rawImport:  { color: '#9aa5b1', width: 2, opacity: 0.55, dasharray: [1, 1] },   // faint, whole uploaded ride
+    chunkPick:  { color: '#ffe14d', width: 4, opacity: 0.9 },                       // subsection currently being selected
+    manual:     { color: '#5ba4cf', width: 3, opacity: 0.9, dasharray: [2, 1] },
+    proposed:   { color: '#c77dff', width: 3, opacity: 0.9, dasharray: [2, 1] },    // saved fit_upload chunk, not yet exported
+    exported:   { color: '#4caf50', width: 3, opacity: 0.9, dasharray: [2, 1] },    // marked is_exported
+    vertex:     { color: '#fff700', radius: 5, strokeColor: '#1a1a1a', strokeWidth: 1.5 },
+    // Comment/photo markers at a specific point along a track (track_locations) —
+    // one neutral color regardless of entry type, unlike trailStatus's markers,
+    // since tracks have no status concept to color by.
+    locationPoint: { color: '#ffb74d', radius: 6, strokeColor: '#1a1a1a', strokeWidth: 1.5 },
+  },
 };

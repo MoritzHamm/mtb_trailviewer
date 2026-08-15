@@ -110,6 +110,135 @@
   </div>
 </div>
 
+<div id="projects-wrap">
+  <div id="projects-picker">
+    <h3>Projects</h3>
+    <select id="project-select">
+      <option value="">— open a project —</option>
+    </select>
+    <div id="project-new-row" style="display:none">
+      <input id="project-new-name" type="text" placeholder="New project name">
+      <button id="project-new-create">Create</button>
+    </div>
+    <div id="projects-picker-hint" class="popup-trail-hint" style="display:none">Log in to see/create your projects — or open a link someone shared with you.</div>
+  </div>
+
+  <div id="project-active" style="display:none">
+    <div class="project-active-header">
+      <h3 id="project-active-name"></h3>
+      <button id="project-close" title="Close project">✕</button>
+    </div>
+    <div id="project-active-desc"></div>
+    <div class="project-active-actions">
+      <button id="project-share-link">Copy share link</button>
+    </div>
+
+    <div id="track-owner-controls" style="display:none">
+      <div class="project-active-actions">
+        <button id="track-import-btn">Import .fit</button>
+        <button id="track-manual-btn">Draw manual track</button>
+      </div>
+    </div>
+
+    <ul id="track-list"></ul>
+
+    <div id="track-editor-wrap" style="display:none">
+      <hr class="sep">
+      <div class="track-editor-header">
+        <input id="track-editor-name" type="text" title="Track name">
+        <span id="track-editor-source-badge"></span>
+      </div>
+
+      <div class="track-editor-row">
+        <label>Simplify</label>
+        <span class="val" id="track-simplify-val">0 m</span>
+      </div>
+      <input type="range" id="track-simplify-slider" min="0" max="30" step="1" value="0">
+      <div class="track-editor-actions">
+        <button id="track-simplify-apply">Apply</button>
+        <button id="track-simplify-reset">Reset to raw</button>
+      </div>
+
+      <div class="track-editor-actions">
+        <button id="track-edit-points-btn">Edit points</button>
+        <button id="track-comments-btn">Comments</button>
+      </div>
+      <div class="track-editor-actions">
+        <button id="track-bulk-photos-btn">Bulk upload photos</button>
+        <button id="track-export-gpx-btn">Export GPX</button>
+      </div>
+      <div class="track-editor-actions">
+        <button id="track-mark-exported-btn">Mark exported</button>
+      </div>
+      <div class="track-editor-actions">
+        <button id="track-delete-btn" class="danger">Delete track</button>
+        <button id="track-editor-close">Close</button>
+      </div>
+      <div id="track-editor-message"></div>
+    </div>
+  </div>
+</div>
+
+<div id="fit-import-wrap" style="display:none">
+  <div id="fit-import-panel">
+    <div class="entry-form-header">
+      <h3>Import .fit</h3>
+      <button id="fit-import-close" aria-label="Close" title="Close">✕</button>
+    </div>
+    <input id="fit-import-file" type="file" accept=".fit">
+    <div id="fit-import-status"></div>
+    <div id="fit-import-profile-wrap" style="display:none">
+      <canvas id="fit-profile-canvas" width="440" height="120"></canvas>
+      <div class="popup-trail-hint">Drag the two handles to pick a chunk — the highlighted stretch on the map is what gets saved.</div>
+      <input id="fit-import-chunk-name" type="text" placeholder="Name for this chunk (optional)">
+      <div class="track-editor-actions">
+        <button id="fit-import-add-chunk">Add chunk as track</button>
+        <button id="fit-import-done">Done importing</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="track-comments-wrap" style="display:none">
+  <div id="track-comments-panel">
+    <div class="entry-form-header">
+      <h3 id="track-comments-title">Comments</h3>
+      <button id="track-comments-close" aria-label="Close" title="Close">✕</button>
+    </div>
+    <div id="track-comments-list"></div>
+
+    <div class="entry-form-add-label">Add a comment</div>
+    <input id="track-comment-name" type="text" placeholder="Your name" style="display:none">
+    <textarea id="track-comment-text" placeholder="Comment… (Enter to save, Ctrl+Enter for a new line)"></textarea>
+    <input id="track-comment-photo" type="file" accept="image/*" title="Uploads immediately" style="display:none">
+    <div id="track-comment-message"></div>
+  </div>
+</div>
+
+<div id="track-bulk-photos-wrap" style="display:none">
+  <div id="track-bulk-photos-panel">
+    <div class="entry-form-header">
+      <h3>Bulk upload photos</h3>
+      <button id="track-bulk-photos-close" aria-label="Close" title="Close">✕</button>
+    </div>
+    <div class="popup-trail-hint">Photos are matched to a point on the track by comparing each photo's EXIF timestamp to the recorded GPS time — only works for tracks imported from a .fit file. Unmatched photos (no EXIF time, or too far from any recorded time) attach to the track as a whole instead.</div>
+    <input id="track-bulk-photos-file" type="file" accept="image/*" multiple>
+    <div class="track-editor-row">
+      <label for="track-bulk-photos-offset">Camera clock offset from UTC (hours)</label>
+      <span class="val" id="track-bulk-photos-offset-val">0</span>
+    </div>
+    <input id="track-bulk-photos-offset" type="number" step="0.5" value="0" style="width:100%">
+    <div class="track-editor-actions">
+      <button id="track-bulk-photos-match">Match photos</button>
+    </div>
+    <div id="track-bulk-photos-preview"></div>
+    <div class="track-editor-actions">
+      <button id="track-bulk-photos-upload" disabled>Upload photos</button>
+    </div>
+    <div id="track-bulk-photos-message"></div>
+  </div>
+</div>
+
 <div id="entry-form-wrap" style="display:none">
   <div id="entry-form">
     <div class="entry-form-header">
@@ -169,6 +298,9 @@ function updateAuthUI(session) {
   authSignedIn.style.display  = signedIn ? 'flex'  : 'none';
   if (signedIn) authEmailDisplay.textContent = session.user.email;
   refreshTrailData();
+  // tracks.js (loaded after this script) hooks in here rather than the other way
+  // around, so this file doesn't need to know it exists.
+  if (window.onTracksAuthChange) window.onTracksAuthChange(session);
 }
 
 document.getElementById('auth-send-link').addEventListener('click', async () => {
@@ -2022,5 +2154,10 @@ document.addEventListener('click', e => {
   if (!document.getElementById('search-wrap').contains(e.target)) closeDropdown();
 });
 </script>
+<!-- Projects/tracks (FIT import, chunking, manual drawing, comments) — kept out of
+     the inline script above (already ~2000 lines) since it's a largely independent
+     feature. Loaded last so `map`/`sb`/`currentSession`/`escapeHtml` already exist as
+     globals; see mtb-editor/CLAUDE.md for the schema/design. -->
+<script src="tracks.js"></script>
 </body>
 </html>
