@@ -421,32 +421,44 @@ maplibregl.addProtocol('slope', async (params) => {
 });
 
 // ---------------------------------------------------------------------------
-// Wetness / vegetation-height overlay protocols — decode a single channel of
-// the packed overlay RGBA tiles (see generate_overlay_tiles.py: B=CHM, A=wetness)
-// into the two-stop ramps from VIEWER_STYLE (style-config.js).
+// Wetness / vegetation-height overlay protocols — each is its own single-
+// channel (grayscale) WebP PMTiles archive (see generate_overlay_tiles.py),
+// recolored into the two-stop ramps from VIEWER_STYLE (style-config.js).
+//
+// Deliberately two separate archives, not one packed RGBA tile: WebP lossy
+// always transforms RGB→YUV with 4:2:0 chroma subsampling, which bled real
+// signal between channels when CHM/wetness were packed together (measured
+// ~1.9m mean CHM error) — see foundation/CLAUDE.md's "Overlay status" for the
+// numbers. Grayscale has no chroma plane to bleed into. Costs nothing at
+// request time since only one overlay is ever shown at a time.
+//
+// Decoded via createImageBitmap + canvas — safe here (unlike the terrain-RGB/
+// slope protocol above, which needs UPNG for exact-byte fidelity) because
+// there's no data in alpha to premultiply-corrupt: each tile is single-
+// channel to begin with. See mtb-editor/CLAUDE.md's canvas premultiplied-
+// alpha section for the (now-historical) reason UPNG was used here too.
 // ---------------------------------------------------------------------------
-const overlayTiles = new pmtiles.PMTiles(`${TILE_BASE}/overlay.pmtiles`);
+const vegheightTiles = new pmtiles.PMTiles(`${TILE_BASE}/vegheight.pmtiles`);
+const wetnessTiles   = new pmtiles.PMTiles(`${TILE_BASE}/wetness.pmtiles`);
 
-function makeChannelProtocol(channelIndex, colorLow, colorHigh) {
+function makeGrayscaleProtocol(tileset, colorLow, colorHigh) {
   return async (params) => {
     const proto = params.url.split('://')[0];
     const [z, x, y] = params.url.replace(`${proto}://`, '').split('/').map(Number);
     try {
-      const tile = await overlayTiles.getZxy(z, x, y);
+      const tile = await tileset.getZxy(z, x, y);
       if (!tile) throw new Error('not found');
-      // Canvas 2D surfaces store pixels premultiplied by alpha internally, no
-      // matter the compositing mode — any pixel with A=0 (bone-dry ground,
-      // very common) permanently loses its R/G/B the instant it's drawn,
-      // since wetness lives in the alpha channel as plain data, not real
-      // transparency. UPNG decodes the PNG bytes directly, bypassing canvas
-      // (and its premultiplication) entirely.
       const S = 256;
-      const src = new Uint8Array(UPNG.toRGBA8(UPNG.decode(tile.data))[0]);
+      const bitmap = await createImageBitmap(new Blob([tile.data], { type: 'image/webp' }));
+      const srcCanvas = new OffscreenCanvas(S, S);
+      const sctx = srcCanvas.getContext('2d');
+      sctx.drawImage(bitmap, 0, 0);
+      const src = sctx.getImageData(0, 0, S, S).data;
 
       const out = new ImageData(S, S);
       const dst = out.data;
       for (let i = 0; i < src.length; i += 4) {
-        const t = src[i + channelIndex] / 255;
+        const t = src[i] / 255;   // grayscale: R=G=B, so channel 0 is the value
         const [r, g, b] = lerpColor(colorLow, colorHigh, t);
         dst[i] = r; dst[i + 1] = g; dst[i + 2] = b; dst[i + 3] = 255;
       }
@@ -461,11 +473,10 @@ function makeChannelProtocol(channelIndex, colorLow, colorHigh) {
   };
 }
 
-// A channel = wetness, B channel = CHM (see generate_overlay_tiles.py)
 maplibregl.addProtocol('wetness',
-  makeChannelProtocol(3, VIEWER_STYLE.wetness.colorLow, VIEWER_STYLE.wetness.colorHigh));
+  makeGrayscaleProtocol(wetnessTiles, VIEWER_STYLE.wetness.colorLow, VIEWER_STYLE.wetness.colorHigh));
 maplibregl.addProtocol('vegheight',
-  makeChannelProtocol(2, VIEWER_STYLE.vegheight.colorLow, VIEWER_STYLE.vegheight.colorHigh));
+  makeGrayscaleProtocol(vegheightTiles, VIEWER_STYLE.vegheight.colorLow, VIEWER_STYLE.vegheight.colorHigh));
 
 const CENTER_LNG = 14.445;   // full Dalarna region
 const CENTER_LAT = 61.005;
@@ -550,14 +561,17 @@ const map = new maplibregl.Map({
         tiles: ['wetness://{z}/{x}/{y}'],
         tileSize: 256,
         minzoom: 12,
-        maxzoom: 17,
+        // Archive only goes to Z16 (see generate_overlay_tiles.py) — this must match,
+        // not the old Z17, or MapLibre requests real (nonexistent) Z17 tiles instead
+        // of overzooming Z16, and the layer just disappears past this zoom.
+        maxzoom: 16,
       },
       'vegheight-tiles': {
         type: 'raster',
         tiles: ['vegheight://{z}/{x}/{y}'],
         tileSize: 256,
         minzoom: 12,
-        maxzoom: 17,
+        maxzoom: 16,
       },
       osmvec: {
         type: 'vector',
@@ -815,7 +829,12 @@ const map = new maplibregl.Map({
   zoom: loadSetting('viewZoom'),
   bearing: loadSetting('viewBearing'),
   pitch: loadSetting('viewPitch'),
-  maxPitch: 85,
+  // Lower than MapLibre's default 85 — steep pitch over exaggerated terrain is
+  // where the camera-to-terrain ray is most likely to fail to intersect
+  // anything, producing a NaN LngLat that crashes the map (see the recovery
+  // handler below). Doesn't eliminate the underlying MapLibre bug, just makes
+  // it much less likely to trigger.
+  maxPitch: 70,
   // Keep more zoom levels of already-fetched tiles resident (default 5) so
   // coarser zooms loaded earlier (e.g. the full-Dalarna overview at load time)
   // stick around as MapLibre's own fallback while panning into new areas,
@@ -947,6 +966,32 @@ vertSlider.addEventListener('input', () => {
   vertVal.textContent = v.toFixed(1) + '×';
   if (toggle3d.checked) map.setTerrain({ source: 'terrain', exaggeration: v });
   saveSetting('vertEx', vertSlider.value);
+});
+
+// ---------------------------------------------------------------------------
+// Terrain-camera NaN recovery — MapLibre's terrain-mode ray/terrain
+// intersection can occasionally fail (typically a mouseout firing while the
+// camera is grazing steep exaggerated terrain near maxPitch) and produce an
+// invalid (NaN) LngLat. That throws from inside MapLibre's own event
+// dispatch and leaves the transform permanently poisoned — every further
+// interaction re-throws, which reads as the map "freezing". This is an
+// upstream MapLibre issue (lowering maxPitch above just makes it rarer, not
+// impossible), so recover instead of trying to prevent it outright: drop out
+// of 3D and reset the camera, which rebuilds the transform from scratch.
+// ---------------------------------------------------------------------------
+window.addEventListener('error', (e) => {
+  if (!/Invalid LngLat/.test(e.message || '')) return;
+  console.warn('Terrain camera hit an invalid state — resetting to 2D.', e.error);
+  map.setTerrain(null);
+  map.jumpTo({ pitch: 0 });
+  toggle3d.checked = false;
+  const vertRow = document.getElementById('vert-row');
+  vertRow.style.opacity       = '.4';
+  vertRow.style.pointerEvents = 'none';
+  vertSlider.style.opacity       = '.4';
+  vertSlider.style.pointerEvents = 'none';
+  saveSetting('terrain3d', false);
+  saveSetting('viewPitch', 0);
 });
 
 // ---------------------------------------------------------------------------

@@ -23,10 +23,13 @@ here today is the map viewing/rendering foundation that editor will sit on top o
 
 `tiles/` is gitignored (large binaries). Expected contents when fully populated:
 `dalarna.pmtiles` (OSM vector layers), `terrain.pmtiles` (terrain-RGB elevation, symlink
-to `/mnt/g/lidar-output/terrain.pmtiles` on the desktop), `overlay.pmtiles` (retired —
-see `foundation/CLAUDE.md`), `coverage.geojson` (mask showing what area has real data).
-On a fresh checkout (e.g. a laptop), this directory may have little or nothing in it —
-that's expected, see the tile-proxy section below.
+to `/mnt/g/lidar-output/terrain.pmtiles` on the desktop), `vegheight.pmtiles` +
+`wetness.pmtiles` (each a separate single-channel/grayscale WebP tileset — reworked
+from one packed `overlay.pmtiles`, see `foundation/CLAUDE.md`'s "Overlay status"; not
+yet deployed to R2 — the old 238GB `overlay.pmtiles` is still what's live there until
+the new build is run and pushed), `coverage.geojson` (mask showing what area has real
+data). On a fresh checkout (e.g. a laptop), this directory may have little or nothing
+in it — that's expected, see the tile-proxy section below.
 
 ## Local dev server + Cloudflare R2 tile proxy
 
@@ -77,6 +80,19 @@ well under that on the terrain/overlay files (~250GB).
 
 ## Elevation / terrain-RGB rendering
 
+- **3D terrain camera can freeze the map (upstream MapLibre bug).** With real terrain
+  active (`map.setTerrain(...)`) at steep pitch, MapLibre's camera-to-terrain ray can
+  fail to intersect anything and produce a NaN `LngLat`, which throws from inside
+  MapLibre's own event dispatch (typically triggered by a `mouseout` while the camera
+  grazes steep exaggerated terrain near `maxPitch`) and leaves the transform
+  permanently poisoned — every further interaction re-throws, which reads as the map
+  freezing. Mitigated, not eliminated: `maxPitch` lowered from MapLibre's default 85 to
+  70 (steeper pitches are where this triggers most easily), plus a `window.on('error')`
+  handler that detects the "Invalid LngLat" message and recovers by dropping out of 3D
+  and resetting pitch to 0 (rebuilds the transform from scratch). If this still
+  reproduces, the next lever is capping `vertSlider`'s max exaggeration (currently 4.0x)
+  lower, or reducing `maxPitch` further — there's no way to fix the root cause from
+  application code, only reduce how often the camera can end up in that state.
 - Decoding: `height_m = -10000 + (R*65536 + G*256 + B) * 0.1` (Mapbox terrain-RGB spec).
 - `sampleElevation()` (index.html) reads `terrain.pmtiles` bytes **directly** at a fixed
   zoom (17) via UPNG decode, bypassing MapLibre's `queryTerrainElevation()` API
@@ -91,17 +107,29 @@ well under that on the terrain/overlay files (~250GB).
   1°, ramps to orange by 5° (~8.7% grade), red by 25% grade (~14.0°), violet by 100%
   grade (45°, clamps there).
 
-## Canvas premultiplied-alpha bug (why UPNG.js exists here)
+## Canvas premultiplied-alpha bug (history — why the overlay decode changed)
 
-Overlay channels pack real data into the PNG **alpha** channel (wetness — see
-`foundation/generate_overlay_tiles.py`), not real transparency. `<canvas>` surfaces
-store pixels premultiplied by alpha internally regardless of compositing mode, so any
-pixel with alpha=0 permanently loses its RGB the instant it's drawn — this silently
-zeroed out CHM/vegetation-height data wherever wetness happened to be 0. Fixed by
-decoding PNG bytes directly via `UPNG.decode()`/`UPNG.toRGBA8()` (pako-backed),
-bypassing `createImageBitmap`/`OffscreenCanvas`/`getImageData` entirely. Do not
-reintroduce a canvas-based decode path for any tile carrying non-transparency data in
-alpha.
+Overlay channels used to pack real data into the PNG **alpha** channel (wetness), not
+real transparency. `<canvas>` surfaces store pixels premultiplied by alpha internally
+regardless of compositing mode, so any pixel with alpha=0 permanently lost its RGB the
+instant it was drawn — this silently zeroed out CHM/vegetation-height data wherever
+wetness happened to be 0. Originally fixed by decoding PNG bytes directly via
+`UPNG.decode()`/`UPNG.toRGBA8()` (pako-backed), bypassing
+`createImageBitmap`/`OffscreenCanvas`/`getImageData` entirely.
+
+**Superseded by the overlay rework** (see `foundation/CLAUDE.md`'s "Overlay status"):
+CHM and wetness are no longer packed into one RGBA tile at all — each is its own
+single-channel (grayscale) WebP tileset (`vegheight.pmtiles`/`wetness.pmtiles`), so
+there's no alpha channel carrying data to begin with. This was forced by a second,
+unrelated problem: WebP lossy compression transforms RGB→YUV with chroma subsampling,
+which bled real signal between channels when CHM/wetness were packed into R/G together
+(measured ~1.9m mean CHM error) — grayscale has no chroma plane to bleed into. With no
+data in alpha (or any packed second channel), `makeGrayscaleProtocol` (`index.html`) now
+decodes via plain `createImageBitmap` + `OffscreenCanvas.getImageData` — no custom
+parser needed for this protocol. **This does not apply to terrain-RGB/slope**, which
+still decodes via UPNG for exact-byte fidelity (elevation is encoded directly into RGB
+bytes at 0.1m precision — any recompression or canvas color-management pass could shift
+a byte and corrupt the decoded elevation); don't touch that path based on this section.
 
 ## OSM feature selection / highlighting
 

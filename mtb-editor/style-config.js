@@ -46,7 +46,8 @@ const VIEWER_STYLE = {
     ],
   },
 
-  // Overlay channel ramps — see generate_overlay_tiles.py (B=CHM, A=wetness)
+  // Overlay ramps — vegheight.pmtiles/wetness.pmtiles are separate single-channel
+  // (grayscale) tilesets, see generate_overlay_tiles.py
   wetness:   { colorLow: [168, 138, 91],  colorHigh: [27, 79, 114] },  // dry tan → wet blue
   vegheight: { colorLow: [194, 178, 128], colorHigh: [18, 63, 18] },   // bare tan → dark canopy green
 

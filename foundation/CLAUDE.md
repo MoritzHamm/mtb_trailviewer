@@ -57,15 +57,18 @@ them from git.
 ### Tile generation & packing
 - **`generate_elevation_tiles.py`** — DTM GeoTIFF → Mapbox terrain-RGB tiles.
   Encoding: `height_m = -10000 + (R*65536 + G*256 + B) * 0.1`. Z12–Z15 by default.
-- **`generate_overlay_tiles.py`** — packs 8-bit analysis layers into an RGBA tile
-  pyramid: R=reserved (LRM removed for now), G=SVF (placeholder 0, not yet computed),
-  B=CHM (0=bare, 255=35m canopy), A=Wetness (0=dry, 255=wet). Missing source channels
-  fill with their neutral value. **Retired for now** per the reorg — see "Overlay
-  status" below.
-- **`pack_tiles.py`** — z/x/y.png tile directory → single PMTiles archive, via the
-  `go-pmtiles` CLI. Tile reads are parallelised: reading millions of small files one at
-  a time on a slow network mount (`/mnt/*`) turns into a many-hour crawl, so
-  `tile_dir` should live on fast local storage.
+- **`generate_overlay_tiles.py`** — writes two independent single-channel (grayscale)
+  WebP tile pyramids, `vegheight/` (from CHM, 0=bare/255=35m canopy) and `wetness/`
+  (0=dry/255=wet) — **not** packed into one RGBA tile, see "Overlay status" below for
+  why. A tile is only written if CHM has a real pixel there, gating both layers so they
+  always share the same real-coverage footprint even though wetness (SLU, all-Sweden)
+  would otherwise have data everywhere. `--webp-quality` (default 55) controls both.
+- **`pack_tiles.py`** — z/x/y.<ext> tile directory → single PMTiles archive, via the
+  `go-pmtiles` CLI (`--format png`\|`webp` controls both the glob extension and the
+  mbtiles `format` metadata; overlay's two layers each need their own `pack_tiles.py`
+  call, pointed at `vegheight/`/`wetness/` respectively). Tile reads are parallelised:
+  reading millions of small files one at a time on a slow network mount (`/mnt/*`) turns
+  into a many-hour crawl, so `tile_dir` should live on fast local storage.
 - **`log_utils.py`** — shared logging: `log(msg)` (timestamped permanent line) and
   `Progress(...)` (in-place `\r`-refreshed line with ETA, so long tile loops don't
   flood logs with one line per checkpoint).
@@ -93,13 +96,59 @@ Two work-dir tiers, matched to WSL2's storage characteristics:
 it used to be a child directory `viewer/`).
 
 ### Overlay status
-Overlay tiles (vegetation height + wetness) are **on hold** pending a rework:
-restricting generation to terrain's real-coverage footprint, and moving wetness off the
-alpha channel (packing data into alpha is fragile — see the canvas premultiplied-alpha
-bug in `mtb-editor/CLAUDE.md`, which was a direct consequence of that choice). The old
-256GB of raw overlay source tiles was deleted from local disk to reclaim space; the old
-`overlay.pmtiles` build still exists at `/mnt/g/lidar-output/overlay.pmtiles` as a
-fallback, not currently deployed to R2.
+Overlay tiles (vegetation height + wetness) were on hold at 238GB in one `overlay.pmtiles`
+— too big to deploy — for three compounding reasons, all fixed:
+
+1. **Wrong footprint.** The old build wrote a tile whenever *any* channel had data
+   anywhere in its 64-tile-wide read strip (`_strip_worker`'s `has_data` check operated
+   per-strip, not per-tile). Since Wetness (SLU, all-Sweden) always has data, this wrote
+   tiles across the *entire* Dalarna bounding rectangle, not just the ~46% that's real
+   LiDAR coverage — `generate_elevation_tiles.py` avoids this because it reprojects one
+   tile at a time, so its own per-tile "any real pixel" check is naturally exact. Fix:
+   `_read_strip` now also returns the pre-fill validity mask, and a tile is written only
+   if **CHM** (not wetness) has a real pixel somewhere in that specific tile — matching
+   terrain's own footprint exactly, one-tile-at-a-time semantics included.
+2. **Z17 wasn't worth it.** Z17 alone was 74.9% of terrain's real-coverage tile count
+   (1,407,517 of 1,879,004) for detail (canopy height, wetness) that doesn't carry
+   meaningful signal at that zoom. Default max zoom dropped **17 → 16**; the browser
+   upscales Z16 for closer views.
+3. **PNG was lossless on data that doesn't need to be — but naive lossy WebP was
+   actively wrong, not just imprecise.** First attempt: pack CHM (R) + Wetness (G) into
+   one RGBA tile, lossy WebP q55. Measured on real Lövberget data: mean CHM error
+   13.7/255 (~1.9m), 44% of pixels off by more than 10/255, barely improving even at
+   q90 (mean error 10.9/255). Root cause: WebP lossy always transforms RGB→YUV with
+   4:2:0 chroma subsampling *regardless of quality* — packing two unrelated data
+   channels into R/G bled real signal between them; this is inherent to the format, not
+   a tunable setting. Fix: **two separate single-channel (grayscale "L") WebP
+   tilesets**, `vegheight.pmtiles` + `wetness.pmtiles`, one PNG-equivalent request each
+   (the viewer only ever shows one overlay at a time, so this costs nothing extra at
+   request time). Grayscale has no chroma plane to bleed into — measured mean error
+   dropped to ~3.5–4.6/255 (~0.6m CHM) at the same q55, an order of magnitude better,
+   and still ~7x smaller than the old packed PNG (14.1 KB/tile combined vs. 98.2
+   KB/tile). **Lesson: never pack unrelated data channels into one lossy-WebP/JPEG-style
+   image — treat each data layer as its own grayscale image if lossy compression is
+   used at all.**
+
+Combined estimate (real tile counts from (1)+(2), measured combined bytes/tile from
+(3)): 471,487 real-coverage tiles at Z12–16 × ~14.1 KB/tile ≈ **6.5–7GB total** for both
+files (down from 238GB). `pack_tiles.py` gained a `--format` flag (`png`|`webp`)
+controlling both the glob extension and the mbtiles `format` metadata field;
+`generate_overlay_tiles.py` writes `vegheight/` and `wetness/` subdirectories, each
+packed separately (`build_pipeline.sh` does both automatically).
+
+**Side effect:** since each tileset is single-channel, data never touches alpha at all
+(no R=CHM/G=wetness/B=reserved/A=255 packing needed either) — this also means the
+overlay decode in `index.html` no longer needs UPNG's raw-byte parsing; a plain
+`createImageBitmap`+canvas decode is safe (see the canvas premultiplied-alpha bug in
+`mtb-editor/CLAUDE.md` for why that used to matter).
+
+The old 256GB of raw overlay source tiles was deleted from local disk to reclaim space;
+the old (pre-rework) `overlay.pmtiles` still exists at `/mnt/g/lidar-output/overlay.pmtiles`
+as a fallback until the reworked build is verified and re-deployed. **Verified so far:
+only the Lövberget sample tile (Z14-16, 115 tiles)** — code changes are in
+`generate_overlay_tiles.py`/`pack_tiles.py`/`build_pipeline.sh`/`mtb-editor/deploy.sh`/
+`mtb-editor/index.html`/`mtb-editor/style-config.js`, but the full-Dalarna run hasn't
+happened yet (see "What Comes Next" below).
 
 ## Known Issues / Gotchas (pipeline-specific)
 
@@ -140,6 +189,10 @@ just refactored. Treat any old references to a working `contours.py` as aspirati
    space), tiered by 5m/25m/100m hierarchy for styling.
 3. **Cliff detection** — derive from DTM slope raster (slope > threshold → cliff),
    output as vector polygons/lines.
-4. **SVF (Sky View Factor)** — currently a placeholder-0 channel in
+4. **SVF (Sky View Factor)** — currently a placeholder-0 channel (B) in
    `generate_overlay_tiles.py`; needs an actual computation.
-5. **Overlay rework** — see "Overlay status" above.
+5. **Overlay rework** — code done, see "Overlay status" above. Still needed: run the
+   full-Dalarna build (`build_pipeline.sh --skip-osm --skip-terrain`, CHM+wetness only,
+   several hours — produces `vegheight.pmtiles` + `wetness.pmtiles`), verify the
+   reworked decode in a browser, then `mtb-editor/deploy.sh --with-overlay` to actually
+   ship it — none of that has run yet, only the Lövberget sample tile has been verified.
