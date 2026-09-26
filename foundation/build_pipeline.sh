@@ -23,8 +23,9 @@
 # Steps:
 #   1. OSM extraction        → $WORK_SLOW/osm_layers/
 #   2. Vector PMTiles        → $WORK_SLOW/dalarna.pmtiles
-#   3. RGBA overlay tiles    → $WORK_FAST/overlay-tiles/
-#   4. Overlay PMTiles       → $WORK_SLOW/overlay.pmtiles
+#   3. WebP overlay tiles    → $WORK_FAST/overlay-tiles/{vegheight,wetness}/  (Z12-16 by
+#                                                          default, see --overlay-max-zoom=)
+#   4. Overlay PMTiles       → $WORK_SLOW/{vegheight,wetness}.pmtiles
 #   5. Terrain RGB tiles     → $WORK_FAST/terrain-tiles/  → $WORK_SLOW/terrain.pmtiles
 #   6. Copy tiles to mtb-editor/tiles/
 #
@@ -54,6 +55,8 @@ SKIP_OSM=false
 SKIP_OVERLAY=false
 SKIP_TERRAIN=false
 MAX_ZOOM=17
+OVERLAY_MAX_ZOOM=16   # Z17 is ~75% of the tile count for detail that doesn't matter
+                      # for canopy height/wetness — see foundation/CLAUDE.md
 BBOX="342500 6630000 600000 6900000"   # full Dalarna
 WORK_FAST="$HOME/lidar-output"         # tile pyramids — needs fast local disk
 WORK_SLOW="/mnt/g/lidar-output"        # everything else — fine on a slower mount
@@ -68,6 +71,7 @@ for arg in "$@"; do
     --skip-overlay)  SKIP_OVERLAY=true ;;
     --skip-terrain)  SKIP_TERRAIN=true ;;
     --max-zoom=*)    MAX_ZOOM="${arg#--max-zoom=}" ;;
+    --overlay-max-zoom=*) OVERLAY_MAX_ZOOM="${arg#--overlay-max-zoom=}" ;;
     --bbox=*)        BBOX="${arg#--bbox=}" ;;
     --work-fast=*)   WORK_FAST="${arg#--work-fast=}" ;;
     --work-slow=*)   WORK_SLOW="${arg#--work-slow=}" ;;
@@ -91,7 +95,8 @@ mkdir -p "$WORK_FAST" "$WORK_SLOW"
 OSM_LAYERS="$WORK_SLOW/osm_layers"
 VEC_PMTILES="$WORK_SLOW/dalarna.pmtiles"
 OVERLAY_TILES="$WORK_FAST/overlay-tiles"
-OVERLAY_PMTILES="$WORK_SLOW/overlay.pmtiles"
+VEGHEIGHT_PMTILES="$WORK_SLOW/vegheight.pmtiles"
+WETNESS_PMTILES="$WORK_SLOW/wetness.pmtiles"
 TERRAIN_TILES="$WORK_FAST/terrain-tiles"
 TERRAIN_PMTILES="$WORK_SLOW/terrain.pmtiles"
 
@@ -162,16 +167,19 @@ fi
 # Step 3 + 4: Overlay tiles
 # -----------------------------------------------------------------------------
 if [ "$SKIP_OVERLAY" = false ]; then
-  log "Step 3: Generating RGBA overlay tiles"
+  log "Step 3: Generating overlay tiles (WebP, one tileset per layer)"
 
   OVERLAY_ARGS=(--out "$OVERLAY_TILES" --bbox $BBOX)
   [ -n "$CHM_VRT"  ] && [ -f "$CHM_VRT"  ] && OVERLAY_ARGS+=(--chm "$CHM_VRT")
   [ -n "$WETNESS"  ] && [ -f "$WETNESS"  ] && OVERLAY_ARGS+=(--wetness "$WETNESS")
 
-  python "$LIDAR_DIR/generate_overlay_tiles.py" "${OVERLAY_ARGS[@]}" --zoom 12 "$MAX_ZOOM"
+  python "$LIDAR_DIR/generate_overlay_tiles.py" "${OVERLAY_ARGS[@]}" --zoom 12 "$OVERLAY_MAX_ZOOM"
 
   log "Step 4: Packing overlay tiles → PMTiles"
-  python "$LIDAR_DIR/pack_tiles.py" "$OVERLAY_TILES" "$OVERLAY_PMTILES" --name overlay
+  [ -d "$OVERLAY_TILES/vegheight" ] && python "$LIDAR_DIR/pack_tiles.py" \
+    "$OVERLAY_TILES/vegheight" "$VEGHEIGHT_PMTILES" --name vegheight --format webp
+  [ -d "$OVERLAY_TILES/wetness" ] && python "$LIDAR_DIR/pack_tiles.py" \
+    "$OVERLAY_TILES/wetness" "$WETNESS_PMTILES" --name wetness --format webp
 else
   log "Skipping overlay tiles (--skip-overlay)"
 fi
@@ -213,9 +221,10 @@ link_if_exists() {
   [ -f "$1" ] && ln -sf "$1" "$2" && log "  $2 -> $1" || log "  SKIP (not built): $1"
 }
 
-copy_if_exists "$VEC_PMTILES"     "$VIEWER/dalarna.pmtiles"
-link_if_exists "$OVERLAY_PMTILES" "$VIEWER/overlay.pmtiles"
-link_if_exists "$TERRAIN_PMTILES" "$VIEWER/terrain.pmtiles"
+copy_if_exists "$VEC_PMTILES"       "$VIEWER/dalarna.pmtiles"
+link_if_exists "$VEGHEIGHT_PMTILES" "$VIEWER/vegheight.pmtiles"
+link_if_exists "$WETNESS_PMTILES"   "$VIEWER/wetness.pmtiles"
+link_if_exists "$TERRAIN_PMTILES"   "$VIEWER/terrain.pmtiles"
 copy_if_exists "$TERRAIN_TILES/coverage.geojson" "$VIEWER/coverage.geojson"
 
 log "Pipeline complete."

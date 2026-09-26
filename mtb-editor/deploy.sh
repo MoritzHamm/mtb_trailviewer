@@ -3,9 +3,9 @@
 # Deploy mtb-editor to Cloudflare R2.
 #
 # Uploads static assets first (small, synced every run), then the large
-# PMTiles archives. terrain.pmtiles/overlay.pmtiles are read via their real
-# path on G: (readlink -f), not the tiles/ symlink — rclone doesn't follow
-# symlinks by default.
+# PMTiles archives. terrain.pmtiles/vegheight.pmtiles/wetness.pmtiles are read
+# via their real path on G: (readlink -f), not the tiles/ symlink — rclone
+# doesn't follow symlinks by default.
 #
 # Requires an rclone remote already configured against R2's S3-compatible
 # endpoint (rclone config, type s3, provider Cloudflare, acl private) and a
@@ -14,13 +14,15 @@
 # Usage:
 #   bash deploy.sh                        # static assets + dalarna + terrain
 #   bash deploy.sh --skip-terrain         # static assets + dalarna only
-#   bash deploy.sh --with-overlay         # also upload overlay.pmtiles
+#   bash deploy.sh --with-overlay         # also upload vegheight/wetness.pmtiles
 #   bash deploy.sh --remote=X --bucket=Y  # override rclone remote/bucket name
 #
-# overlay.pmtiles is skipped by default — that data is retired pending a
-# rework (restrict to terrain's real-coverage footprint, move wetness off the
-# alpha channel, see foundation/generate_overlay_tiles.py). Not worth
-# uploading the current 255GB build before it's replaced.
+# vegheight.pmtiles/wetness.pmtiles are skipped by default until the reworked
+# build (see foundation/CLAUDE.md's "Overlay status") has actually been run
+# for full Dalarna and verified in a browser — only the Lövberget sample tile
+# has been tested so far. Once verified, expected total is ~6-7GB combined
+# (down from the old single 255GB overlay.pmtiles), so --with-overlay should
+# become the default rather than an opt-in.
 # =============================================================================
 set -euo pipefail
 
@@ -69,11 +71,13 @@ else
 fi
 
 if [ "$SKIP_OVERLAY" = false ]; then
-  log "Uploading overlay.pmtiles (large, background-worthy)"
-  OVERLAY_REAL="$(readlink -f "$MTB_DIR/tiles/overlay.pmtiles")"
-  rclone copyto "$OVERLAY_REAL" "$DEST/tiles/overlay.pmtiles" "${RCLONE_BIG[@]}"
+  log "Uploading vegheight.pmtiles + wetness.pmtiles"
+  VEGHEIGHT_REAL="$(readlink -f "$MTB_DIR/tiles/vegheight.pmtiles")"
+  WETNESS_REAL="$(readlink -f "$MTB_DIR/tiles/wetness.pmtiles")"
+  rclone copyto "$VEGHEIGHT_REAL" "$DEST/tiles/vegheight.pmtiles" "${RCLONE_BIG[@]}"
+  rclone copyto "$WETNESS_REAL"   "$DEST/tiles/wetness.pmtiles"   "${RCLONE_BIG[@]}"
 else
-  log "Skipping overlay.pmtiles (retired for now — pass --with-overlay to force)"
+  log "Skipping vegheight/wetness.pmtiles (pass --with-overlay to force)"
 fi
 
 log "Done."

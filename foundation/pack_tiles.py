@@ -10,6 +10,7 @@ Install (one-time):
 Usage:
     python pack_tiles.py viewer/tiles terrain.pmtiles
     python pack_tiles.py viewer/tiles terrain.pmtiles --name terrain --keep-mbtiles
+    python pack_tiles.py overlay-tiles/vegheight vegheight.pmtiles --name vegheight --format webp
 
 Notes:
     Tile reads are parallelised, since reading millions of small files one at a time
@@ -42,7 +43,7 @@ CHUNK_SIZE = 20_000
 STAGE_ROOT = Path("/mnt/g/lidar-output/.pack_tiles_tmp")
 
 
-def list_tiles(tile_dir: Path):
+def list_tiles(tile_dir: Path, ext: str):
     """Return (zoom_levels, [(z, x, y_xyz, path), ...]).
 
     Only lists directories/globs filenames — never opens a file — so this stays
@@ -58,12 +59,12 @@ def list_tiles(tile_dir: Path):
             if not x_dir.is_dir():
                 continue
             x = int(x_dir.name)
-            for tile_file in x_dir.glob('*.png'):
+            for tile_file in x_dir.glob(f'*.{ext}'):
                 tiles.append((z, x, int(tile_file.stem), tile_file))
     return zoom_levels, tiles
 
 
-def dir_to_mbtiles(tile_dir: Path, mbtiles_path: Path, name: str) -> int:
+def dir_to_mbtiles(tile_dir: Path, mbtiles_path: Path, name: str, fmt: str) -> int:
     conn = sqlite3.connect(mbtiles_path)
     c = conn.cursor()
     c.executescript("""
@@ -78,15 +79,15 @@ def dir_to_mbtiles(tile_dir: Path, mbtiles_path: Path, name: str) -> int:
     """)
 
     log("  Listing tiles...")
-    zoom_levels, tiles = list_tiles(tile_dir)
+    zoom_levels, tiles = list_tiles(tile_dir, fmt)
     if not zoom_levels:
-        log("ERROR: no zoom-level directories found")
+        log(f"ERROR: no zoom-level directories found (looked for *.{fmt} files)")
         sys.exit(1)
     total = len(tiles)
 
     c.executemany("INSERT OR REPLACE INTO metadata VALUES (?, ?)", [
         ('name',        name),
-        ('format',      'png'),
+        ('format',      fmt),
         ('type',        'overlay'),
         ('description', 'Terrain RGB elevation tiles — Lantmäteriet LiDAR'),
         ('version',     '1'),
@@ -144,9 +145,11 @@ def mbtiles_to_pmtiles(mbtiles: Path, output: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description='Pack z/x/y tile dir into a PMTiles archive')
-    ap.add_argument('tile_dir', help='Directory containing z/x/y.png tiles')
+    ap.add_argument('tile_dir', help='Directory containing z/x/y.<format> tiles')
     ap.add_argument('output',   help='Output .pmtiles file path')
     ap.add_argument('--name',         default='terrain', help='Tileset name (default: terrain)')
+    ap.add_argument('--format',       default='png', choices=['png', 'webp'],
+                    help='Tile file format/extension (default: png)')
     ap.add_argument('--keep-mbtiles', action='store_true', help='Keep intermediate .mbtiles file')
     ap.add_argument('--stage-dir', default=None,
                     help=f'Where to build the intermediate .mbtiles (default: {STAGE_ROOT}). '
@@ -168,7 +171,7 @@ def main() -> None:
 
     try:
         log(f"Step 1/2  Building MBTiles from {tile_dir}/  (staging in {stage_dir})")
-        dir_to_mbtiles(tile_dir, mbtiles, args.name)
+        dir_to_mbtiles(tile_dir, mbtiles, args.name, args.format)
 
         log(f"Step 2/2  Converting MBTiles → PMTiles")
         mbtiles_to_pmtiles(mbtiles, staged_output)

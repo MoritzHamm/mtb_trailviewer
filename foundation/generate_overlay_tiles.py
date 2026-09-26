@@ -1,23 +1,40 @@
 #!/usr/bin/env python3
 """
-Generate RGBA overlay tile pyramid from analysis-layer GeoTIFFs.
+Generate WebP overlay tile pyramids from analysis-layer GeoTIFFs.
 
-Packs 8-bit analysis layers into a single RGBA PNG tile set:
+Writes one single-channel (grayscale "L") WebP tile pyramid per analysis layer:
 
-  R = reserved (unused; LRM removed for now, pending a dedicated test setup)
-  G = SVF      255=open sky, 0=enclosed  (placeholder 0 until SVF is computed)
-  B = CHM      0=bare ground, 255=35 m canopy
-  A = Wetness  0=dry (SLU 0), 255=wet (SLU 100)
+  vegheight/{z}/{x}/{y}.webp  — CHM, 0=bare ground, 255=35 m canopy
+  wetness/{z}/{x}/{y}.webp    — SLU wetness, 0=dry (SLU 0), 255=wet (SLU 100)
 
-Any channel whose source file is not supplied is filled with its neutral value.
-Output tiles go to out_dir/{z}/{x}/{y}.png and are suitable for pack_tiles.py.
+Deliberately NOT packed into one RGBA tile (that was tried and measured wrong): WebP
+lossy always transforms RGB→YUV with 4:2:0 chroma subsampling, regardless of quality —
+packing two unrelated data channels into R/G bled real signal between them (measured
+mean CHM error ~13.7/255, i.e. ~1.9m, with 44% of pixels off by more than 10/255, even
+at quality 90). Grayscale WebP has no chroma plane to bleed into, so each layer's own
+lossy compression only degrades against itself (measured mean error ~3.5-4.6/255 at
+quality 55, an order of magnitude better) — see foundation/CLAUDE.md's "Overlay status"
+for the full numbers. This also means alpha is never touched by either tileset, so no
+canvas premultiplied-alpha risk exists here at all (see mtb-editor/CLAUDE.md).
+Splitting into two files costs nothing at request time: the viewer only ever shows one
+overlay layer at a time (Slope/Wetness/Vegetation height are mutually exclusive), so
+it's still one tile fetch per screen tile either way.
+
+A tile is only written for a layer if CHM has at least one real (pre-fill) pixel
+somewhere in it — this matches generate_elevation_tiles.py's own per-tile coverage
+check, so overlay tiles never extend past terrain's real LiDAR footprint just because
+wetness (which covers all of Sweden) has data there. Both layers share this gate (even
+wetness, which would otherwise be written everywhere), so the two tile sets always
+cover exactly the same footprint.
+
+Output is suitable for pack_tiles.py --format webp, once per layer subdirectory.
 
 Usage:
     python generate_overlay_tiles.py \\
         --chm     /mnt/g/lidar-output/lovberget_chm.tif \\
         --wetness /mnt/g/lidar-output/lovberget_wetness.tif \\
         --out     viewer/overlay-tiles \\
-        --zoom    12 17
+        --zoom    12 16
 """
 
 import argparse
@@ -43,8 +60,6 @@ HALF_WORLD      = 20037508.3427892
 WEB_MERC        = CRS.from_epsg(3857)
 WGS84           = CRS.from_epsg(4326)
 MAX_STRIP_TILES = 64   # max tile-columns per strip; limits RAM to ~50 MB/strip at Z17
-
-NEUTRAL = {'svf': 0, 'chm': 0, 'wetness': 0}
 
 
 # ---------------------------------------------------------------------------
@@ -130,8 +145,15 @@ def fill_nodata(data, mask):
 
 
 def _read_strip(src_path: str, strip_transform: Affine, strip_w: int,
-                neutral: float, resampling=Resampling.bilinear) -> np.ndarray | None:
-    """Read one channel for a horizontal strip (TILE_SIZE rows, strip_w cols)."""
+                neutral: float, resampling=Resampling.bilinear
+                ) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+    """Read one channel for a horizontal strip (TILE_SIZE rows, strip_w cols).
+
+    Returns (filled_data, valid_mask) — valid_mask is the *pre-fill* validity (True
+    where this source actually had a real pixel), so callers can tell real coverage
+    apart from gap-filled/neutral values even after fill_nodata smooths the output.
+    (None, None) means the whole strip had no real data at all.
+    """
     dst = np.full((TILE_SIZE, strip_w), np.nan, dtype=np.float32)
     with rasterio.open(src_path) as src:
         reproject(
@@ -145,31 +167,41 @@ def _read_strip(src_path: str, strip_transform: Affine, strip_w: int,
             src_nodata=src.nodata,
             dst_nodata=np.nan,
         )
-    if not np.any(~np.isnan(dst)):
-        return None
-    mask = ~np.isfinite(dst)
+    valid = np.isfinite(dst)
+    if not valid.any():
+        return None, None
+    mask = ~valid
     if mask.any():
         dst = fill_nodata(dst, mask)
-        dst[mask] = neutral
-    return dst
+        dst[~np.isfinite(dst)] = neutral
+    return dst, valid
 
 
 # ---------------------------------------------------------------------------
 # Strip worker — called once per tile-row, processes all tiles in that row
 # ---------------------------------------------------------------------------
 
+def _tile_path(out_dir: Path, layer: str, z: int, tx: int, ty: int) -> Path:
+    return out_dir / layer / str(z) / str(tx) / f"{ty}.webp"
+
+
+def _done_marker(out_dir: Path, z: int, tx: int, ty: int) -> Path:
+    # Shared across both layers (they're always gated identically), so resume-scan
+    # only has to check one place regardless of which layers this run produces.
+    return out_dir / '.done' / str(z) / str(tx) / f"{ty}.marker"
+
+
 def _strip_worker(args: tuple) -> int:
     """
     Process one horizontal strip: all tx values for a given ty at zoom z.
     Reads each source file once for the whole strip, then slices out tiles.
-    Returns the number of tiles written.
+    Returns the number of tiles written (counting a tile once even though it may
+    produce up to two files, one per layer).
     """
-    paths, ty, tx_list, z, out_dir = args
+    paths, ty, tx_list, z, out_dir, webp_quality = args
+    out_dir = Path(out_dir)
 
-    # Re-check which tiles still need writing (resume safety)
-    tx_todo = [tx for tx in tx_list
-               if not (Path(out_dir) / str(z) / str(tx) / f"{ty}.png").exists()
-               and not (Path(out_dir) / str(z) / str(tx) / f"{ty}.empty").exists()]
+    tx_todo = [tx for tx in tx_list if not _done_marker(out_dir, z, tx, ty).exists()]
     if not tx_todo:
         return 0
 
@@ -183,9 +215,17 @@ def _strip_worker(args: tuple) -> int:
     pixel_m       = (east - west) / strip_w
     strip_tf      = Affine(pixel_m, 0, west, 0, -pixel_m, north)
 
-    # Read each channel once for the whole strip
-    chm_s = _read_strip(paths['chm'],     strip_tf, strip_w, 0.0) if paths.get('chm')     else None
-    wet_s = _read_strip(paths['wetness'], strip_tf, strip_w, 0.0) if paths.get('wetness') else None
+    # Read each source once for the whole strip. chm_valid is the pre-fill mask
+    # used as the real-coverage gate below (falls back to wetness's own validity
+    # only if CHM wasn't supplied as an input at all, e.g. a wetness-only test
+    # run — NOT merely because this particular strip has zero real CHM pixels,
+    # which is the normal, expected shape of "outside real coverage" and must
+    # still gate out wetness too; a `chm_valid is not None` check here would
+    # silently fall back to wetness's own validity in exactly that case, since
+    # a fully-empty CHM strip also returns chm_valid=None).
+    chm_s, chm_valid = _read_strip(paths['chm'],     strip_tf, strip_w, 0.0) if paths.get('chm')     else (None, None)
+    wet_s, wet_valid = _read_strip(paths['wetness'], strip_tf, strip_w, 0.0) if paths.get('wetness') else (None, None)
+    gate_valid = chm_valid if paths.get('chm') else wet_valid
 
     def to_uint8_chm(a): return np.clip(np.round(a / 35.0 * 255), 0, 255).astype(np.uint8)
     def to_uint8_wet(a): return np.clip(np.round(a * 2.55), 0, 255).astype(np.uint8)
@@ -194,30 +234,24 @@ def _strip_worker(args: tuple) -> int:
     for tx in tx_todo:
         c0 = (tx - tx_min) * TILE_SIZE
         c1 = c0 + TILE_SIZE
+        marker = _done_marker(out_dir, z, tx, ty)
+        marker.parent.mkdir(parents=True, exist_ok=True)
 
-        channels = {
-            'chm':     to_uint8_chm(chm_s[:, c0:c1]) if chm_s is not None else None,
-            'wetness': to_uint8_wet(wet_s[:, c0:c1]) if wet_s is not None else None,
-        }
-
-        has_data = any(v is not None for v in channels.values())
-        tile_path = Path(out_dir) / str(z) / str(tx) / f"{ty}.png"
-
+        has_data = gate_valid is not None and gate_valid[:, c0:c1].any()
         if not has_data:
-            sentinel = Path(out_dir) / str(z) / str(tx) / f"{ty}.empty"
-            sentinel.parent.mkdir(parents=True, exist_ok=True)
-            sentinel.touch()
+            marker.touch()
             continue
 
-        def ch(key):
-            v = channels.get(key)
-            return v if v is not None else np.full((TILE_SIZE, TILE_SIZE),
-                                                    NEUTRAL[key], dtype=np.uint8)
+        if chm_s is not None:
+            p = _tile_path(out_dir, 'vegheight', z, tx, ty)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(to_uint8_chm(chm_s[:, c0:c1]), 'L').save(p, 'WEBP', quality=webp_quality)
+        if wet_s is not None:
+            p = _tile_path(out_dir, 'wetness', z, tx, ty)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(to_uint8_wet(wet_s[:, c0:c1]), 'L').save(p, 'WEBP', quality=webp_quality)
 
-        r_reserved = np.zeros((TILE_SIZE, TILE_SIZE), dtype=np.uint8)
-        rgba = np.stack([r_reserved, ch('svf'), ch('chm'), ch('wetness')], axis=-1)
-        tile_path.parent.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(rgba, 'RGBA').save(tile_path, compress_level=1)
+        marker.touch()
         written += 1
 
     return written
@@ -228,7 +262,7 @@ def _strip_worker(args: tuple) -> int:
 # ---------------------------------------------------------------------------
 
 def _scan_existing(out_dir: Path, z: int) -> set:
-    z_dir = out_dir / str(z)
+    z_dir = out_dir / '.done' / str(z)
     if not z_dir.is_dir():
         return set()
     found = set()
@@ -236,7 +270,7 @@ def _scan_existing(out_dir: Path, z: int) -> set:
         if x_entry.is_dir():
             tx = int(x_entry.name)
             for y_entry in os.scandir(x_entry.path):
-                if y_entry.name.endswith(('.png', '.empty')):
+                if y_entry.name.endswith('.marker'):
                     found.add((tx, int(y_entry.name.rsplit('.', 1)[0])))
     return found
 
@@ -244,7 +278,8 @@ def _scan_existing(out_dir: Path, z: int) -> set:
 def generate_overlay_tiles(paths: dict, out_dir: Path,
                             zoom_min: int, zoom_max: int,
                             workers: int | None = None,
-                            bbox_3006: tuple[float, float, float, float] | None = None) -> None:
+                            bbox_3006: tuple[float, float, float, float] | None = None,
+                            webp_quality: int = 55) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     all_bounds = []
@@ -283,7 +318,6 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
             cached_paths[key] = _cache_region(p, west, south, east, north, tmp_dir)
         else:
             cached_paths[key] = p
-    cached_paths['svf'] = None  # placeholder
 
     # Each worker holds a full source-strip in memory plus GDAL's own block
     # cache; os.cpu_count() workers (e.g. 24) can exceed available RAM and
@@ -319,7 +353,7 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
             txs_sorted = sorted(txs)
             for i in range(0, len(txs_sorted), MAX_STRIP_TILES):
                 strip_args.append(
-                    (cached_paths, ty, txs_sorted[i:i + MAX_STRIP_TILES], z, str(out_dir))
+                    (cached_paths, ty, txs_sorted[i:i + MAX_STRIP_TILES], z, str(out_dir), webp_quality)
                 )
 
         written = 0
@@ -337,19 +371,29 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
 
     log(f"Done. {total_written} new + {total_skipped} existing = "
         f"{total_written + total_skipped} tiles in {out_dir}/")
-    log(f"Next: pack into PMTiles with")
-    log(f"  python pack_tiles.py {out_dir} overlay.pmtiles")
+    log(f"Next: pack each layer into its own PMTiles archive with")
+    if (out_dir / 'vegheight').is_dir():
+        log(f"  python pack_tiles.py {out_dir}/vegheight vegheight.pmtiles --format webp --name vegheight")
+    if (out_dir / 'wetness').is_dir():
+        log(f"  python pack_tiles.py {out_dir}/wetness   wetness.pmtiles   --format webp --name wetness")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--chm',     help='CHM GeoTIFF  (float32, metres)  → B channel')
-    ap.add_argument('--wetness', help='Wetness GeoTIFF (float32, 0–100) → A channel')
+    ap.add_argument('--chm',     help='CHM GeoTIFF (float32, metres) → vegheight/ tiles; '
+                         'also gates which tiles count as real coverage for both layers')
+    ap.add_argument('--wetness', help='Wetness GeoTIFF (float32, 0-100) → wetness/ tiles')
     ap.add_argument('--out',     default='viewer/overlay-tiles',
-                    help='Output tile directory (default: viewer/overlay-tiles)')
-    ap.add_argument('--zoom',    nargs=2, type=int, default=[12, 17],
-                    metavar=('MIN', 'MAX'), help='Zoom range (default: 12 17)')
+                    help='Output directory — gets vegheight/ and/or wetness/ subdirs '
+                         '(default: viewer/overlay-tiles)')
+    ap.add_argument('--zoom',    nargs=2, type=int, default=[12, 16],
+                    metavar=('MIN', 'MAX'), help='Zoom range (default: 12 16 — Z17 is '
+                         '~75%% of the tile count for detail that doesn\'t matter here)')
+    ap.add_argument('--webp-quality', type=int, default=55,
+                    help='WebP lossy quality 0-100 (default: 55 — measured ~5.5x smaller '
+                         'than lossless PNG combined, with small/acceptable per-layer '
+                         'error since each layer is its own single-channel image)')
     ap.add_argument('--workers', type=int, default=None,
                     help='Parallel worker processes (default: min(cpu_count, 8) '
                          'to avoid OOM on wide low-zoom strips)')
@@ -360,7 +404,6 @@ def main() -> None:
     args = ap.parse_args()
 
     paths = {
-        'svf':     None,
         'chm':     args.chm,
         'wetness': args.wetness,
     }
@@ -371,7 +414,8 @@ def main() -> None:
     log("Overlay tile inputs:")
     bbox_3006 = tuple(args.bbox) if args.bbox else None
     generate_overlay_tiles(paths, Path(args.out), *args.zoom,
-                            workers=args.workers, bbox_3006=bbox_3006)
+                            workers=args.workers, bbox_3006=bbox_3006,
+                            webp_quality=args.webp_quality)
 
 
 if __name__ == '__main__':
