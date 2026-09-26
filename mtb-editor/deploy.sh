@@ -23,6 +23,7 @@
 # uploading the current 255GB build before it's replaced.
 # =============================================================================
 set -euo pipefail
+shopt -s nullglob   # so `*.js` expands to nothing (not a literal, unmatched glob) if the dir ever has none
 
 MTB_DIR="$(cd "$(dirname "$0")" && pwd)"
 REMOTE="Dalarna-MTB"
@@ -52,7 +53,8 @@ log() { printf '[%(%H:%M:%S)T] %s\n' -1 "$1"; }
 
 log "Syncing static assets → $DEST"
 rclone sync "$MTB_DIR/fonts/" "$DEST/fonts/" "${RCLONE_COMMON[@]}"
-for f in index.html style.css style-config.js favicon.ico; do
+for f in index.html style.css favicon.ico "$MTB_DIR"/*.js; do
+  f="$(basename "$f")"
   rclone copyto "$MTB_DIR/$f" "$DEST/$f" "${RCLONE_COMMON[@]}"
 done
 

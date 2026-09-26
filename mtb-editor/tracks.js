@@ -961,17 +961,32 @@ async function refreshTrackComments() {
   if (error) { list.innerHTML = '<div class="history-empty">Could not load comments.</div>'; return; }
   // location_id null == the whole-track bucket; otherwise only this point's own entries.
   const rows = data.filter(row => (row.location_id || null) === commentsLocationId);
-  if (!rows.length) { list.innerHTML = '<div class="history-empty">No comments yet.</div>'; return; }
+
+  // Defensive: a comment entry with no real text shouldn't be shown — the normal
+  // submit path already blocks blank text both client- and server-side
+  // (submitTrackComment / add_track_comment), but this doesn't trust that's the
+  // only way a row can ever get here. When we can actually delete (logged in),
+  // clean the blank one up too rather than leaving it to reappear every refresh.
+  const blankIds = rows.filter(r => r.entry_type === 'comment' && !(r.value.text || '').trim()).map(r => r.id);
+  const visibleRows = rows.filter(r => !blankIds.includes(r.id));
+  if (blankIds.length && currentSession) {
+    sb.from('track_history').delete().in('id', blankIds)
+      .then(({ error: delErr }) => { if (delErr) console.error('Could not clean up blank comment(s)', delErr); });
+  }
+
+  if (!visibleRows.length) { list.innerHTML = '<div class="history-empty">No comments yet.</div>'; return; }
 
   trackHistoryImagePaths.clear();
-  const items = rows.map(row => {
+  const items = visibleRows.map(row => {
     const when = new Date(row.created_at).toLocaleString();
     const who = row.author_name ? escapeHtml(row.author_name) : 'Project member';
     let body;
     if (row.entry_type === 'image') {
       trackHistoryImagePaths.set(row.id, row.value.path);
+      // Public bucket — this is already the full-size image (no separate thumb
+      // is generated for track photos), so the lightbox just reuses this same URL.
       const { data: pub } = sb.storage.from('track-images').getPublicUrl(row.value.path);
-      body = `<img src="${pub.publicUrl}" class="history-thumb">`;
+      body = `<img src="${pub.publicUrl}" class="history-thumb" data-full-src="${pub.publicUrl}">`;
     } else {
       body = escapeHtml(row.value.text || '');
     }
@@ -1354,9 +1369,21 @@ function wireUI() {
   });
 
   // Delegated on the list container itself (not document) so this can never be
-  // reached by index.html's own trail_history-scoped delegated delete handler,
-  // and vice versa — see the .track-history-delete comment in refreshTrackComments.
+  // reached by index.html's own trail_history-scoped delegated delete/lightbox
+  // handlers, and vice versa — see the .track-history-delete comment in
+  // refreshTrackComments. Reuses index.html's #image-lightbox-wrap/-img (already
+  // wired to close on click) rather than a second modal — track photos are
+  // public, so opening it here is just setting .src, no signed-URL fetch needed
+  // (unlike index.html's own openImageLightbox, which is wired to the private
+  // trail-images bucket and would be the wrong bucket for these anyway).
   document.getElementById('track-comments-list').addEventListener('click', async e => {
+    const thumb = e.target.closest('.history-thumb');
+    if (thumb) {
+      document.getElementById('image-lightbox-img').src = thumb.dataset.fullSrc || thumb.src;
+      document.getElementById('image-lightbox-wrap').style.display = 'flex';
+      return;
+    }
+
     const delBtn = e.target.closest('.track-history-delete');
     if (!delBtn || !currentSession) return;
     if (!confirm('Delete this entry? This cannot be undone.')) return;
