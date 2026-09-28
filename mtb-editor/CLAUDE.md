@@ -409,11 +409,87 @@ via JOSM/iD" scope decision.
   offset-hours field — an individual photo that matched to the wrong point can't be
   reassigned or excluded before upload without changing the offset for the whole batch.
 
+## Trail segment editor (vertex-level editing, OSM import/export)
+
+Foundation for eventually publishing edited/new trails to OSM (manually-reviewed `.osm`
+export first, direct API upload possibly later) — see "Future work" below for the two
+pieces meant to build on top of this: a relation builder and FIT-track gap detection.
+Extends `tracks` (0005) rather than forking a new table — see
+`supabase/migrations/0007_track_segments.sql` for the added columns
+(`source_osm_type`/`source_osm_id`/`source_osm_way_ids`, `vertex_origin`,
+`track_group_id`/`segment_order`) and the regenerated `get_public_tracks`.
+
+**A trail segment IS a track** with `source` now also allowing `'osm_way'` — added via
+the OSM popup's "Add to project as editable segment" button (`index.html`, next to the
+existing trail-history buttons), which collects every clipped vector-tile fragment
+sharing the clicked way/relation identity (same fragment-collection query the gold
+selection-glow already uses) and greedily stitches them into one ordered line
+(`stitchFragments`, `index.html`) before handing the coordinates to
+`tracks.js`'s `window.addTrackFromOsmWay`. Disconnected leftover fragments (outside the
+current viewport) are reported, not force-merged — pan closer and re-add if needed.
+
+**Hiding the OSM original once copied**: `source_osm_way_ids` (every fragment's own
+way-level `osm_id` — never the relation id, which line features don't carry) drives a
+`map.setFilter` excluding those ids from `OSM_TRAIL_LINE_LAYERS`
+(`osm-road-casing`/`osm-road-fill`/`osm-track`/`osm-path`) via
+`refreshHiddenOsmIds`/`applyHiddenOsmIdsFilter` (`tracks.js`), reasserted after project
+open/close, any osm-sourced insert/delete/split, and after style reloads (alongside the
+existing `applyOsmVisibility` re-assertion in `map.on('load')`). Known gap: the
+trail-status overlay/glow layers key off `identity_key`, not `osm_id` — they don't
+automatically hide for a now-edited trail.
+
+**Vertex editing** extends the existing point editor (draggable markers, dblclick to
+delete, click-the-line to insert):
+- **Move-clamp**: `vertex_origin` (index-aligned with `geom`, set at creation and
+  preserved/subset through edits — simplify keeps it in sync via
+  `simplifyLngLatWithOrigin`) is the baseline a drag is clamped against
+  (`VERTEX_MOVE_CLAMP_M = 300`, projects onto the clamp boundary rather than rejecting
+  the move outright). There's no real use case for moving a vertex further than that in
+  one drag.
+- **Snap**: dragging a vertex within `SNAP_RADIUS_M` (12m) of another vertex — the
+  active track's own other vertices, or any other track's, within the *same open
+  project* — snaps to it before the clamp check runs. Cross-project snapping and
+  snapping to live OSM way points are deferred (OSM polyline points aren't reliable
+  trail junctions; worth designing once there's real usage data).
+- **Split** ("before"/"after" a vertex — both are `splitAt(N)` under the hood, just
+  different N): a `maplibregl.Popup` on a single click of a vertex (not the drag).
+  Commits immediately as two DB writes (truncate + insert), **not** part of the undo
+  stack — same immediacy class as "Apply"/"Delete track". Both halves keep the same
+  `source`/`source_osm_*`/`track_group_id`/`raw_points`; the new tail gets
+  `segment_order` = max of its group's existing orders + 1 (not true fractional
+  mid-insertion — a simplification worth revisiting if segments get re-split often
+  enough for ordering to actually matter).
+- **Undo/redo** (`editUndoStack`/`editRedoStack`, `Ctrl+Z`/`Ctrl+Shift+Z` or the
+  Undo/Redo buttons): covers move/delete/insert only, in-memory, scoped to the current
+  editing session — cleared on save or close, same as the existing "Reset to raw"
+  precedent for simplify. No persisted edit-history table; nothing else in this schema
+  does server-side geometry history either.
+
+**OSM export** (`trackToOSMXML`/`exportTrailSegmentOSM`, next to `track-export-gpx-btn`):
+same "generate exportable data, upload manually via JOSM" scope decision as GPX export —
+fresh negative-id nodes + one negative-id way, suggested tags. Deliberately never
+attempts `action="modify"`/version reconciliation against a real OSM way (this schema
+doesn't track a live OSM version number, which JOSM needs to merge correctly); when
+`source_osm_type/id` is set, the post-download alert just names the original id for
+manual cross-referencing.
+
+**Not yet browser-tested** — implemented and internally consistency-checked (brace/paren
+balance, cross-reference greps, re-verified file:line citations against the actual
+files), but this session had no browser tool available to exercise it end-to-end. Test
+each piece per the plan's verification section before relying on it:
+drag-clamp, undo/redo, split (check both rows in Supabase), OSM import (way disappears
+from the base layer, reappears as an editable segment), OSM/GPX export.
+
 ## Future work (not built yet)
 
 - OSM write-back integration for creating/editing trails from the app (feeds the
   `is_draft` reconciliation flow above) — Projects/Tracks' GPX export is the
   manual-upload stopgap for this
+- **Relation builder** — group existing ways into a named `route=mtb` relation
+  (builds on the trail segment editor above)
+- **FIT-track gap detection** — flag GPS stretches that don't match any nearby OSM way
+  as new-trail candidates (distance-threshold approach, not full map-matching — human
+  reviews every candidate before it becomes a segment)
 - Route planning UI (admin assembles a route) + GPX/FIT export + a route-description
   render for participants
 - "Local trail maintainer group" collaboration model
