@@ -28,6 +28,12 @@ let activeTrackId = null;
 let editingPoints = false;
 let editVertexMarkers = [];
 let editWorkingCoords = [];
+let editVertexOrigin = [];      // [lng,lat] per vertex, the move-clamp baseline (see VERTEX_MOVE_CLAMP_M)
+let editUndoStack = [];         // {type:'move'|'delete'|'insert', ...} — session-scoped, cleared on save/close
+let editRedoStack = [];
+
+let hiddenOsmWayIds = new Set(); // way-level osm_id's currently hidden from the base OSM layers
+                                  // (every osm_way-sourced track's source_osm_way_ids, unioned)
 
 let manualDrawActive = false;
 let manualDrawCoords = [];
@@ -271,6 +277,46 @@ function metersPerDegreeAt(lat) {
   return { mLng: 111320 * Math.cos(latRad), mLat: 110540 };
 }
 
+function distMeters(a, b) {
+  const mpd = metersPerDegreeAt((a[1] + b[1]) / 2);
+  return Math.hypot((b[0] - a[0]) * mpd.mLng, (b[1] - a[1]) * mpd.mLat);
+}
+
+// A vertex may not move more than this far from its origin (see vertex_origin,
+// 0007_track_segments.sql) — there's no real use case for dragging a vertex
+// further than that, and it guards against a mis-drag silently relocating a
+// point across the map. Projects onto the clamp boundary rather than rejecting
+// the move outright, so a big drag still moves the vertex as far as it's
+// allowed to.
+const VERTEX_MOVE_CLAMP_M = 300;
+
+function clampToOrigin(coord, origin) {
+  if (!origin) return coord;
+  const d = distMeters(origin, coord);
+  if (d <= VERTEX_MOVE_CLAMP_M) return coord;
+  const t = VERTEX_MOVE_CLAMP_M / d;
+  return [origin[0] + (coord[0] - origin[0]) * t, origin[1] + (coord[1] - origin[1]) * t];
+}
+
+// Nearest-vertex snap candidate within the current project — the active track's
+// own other vertices, plus every other track's vertices. Screen-space-agnostic
+// (metres), fine at the zoom levels this editor is used at.
+const SNAP_RADIUS_M = 12;
+
+function findSnapCandidate(coord, excludeTrackId, excludeIndex) {
+  let best = null, bestDist = SNAP_RADIUS_M;
+  const consider = (pt) => {
+    const d = distMeters(coord, pt);
+    if (d < bestDist) { bestDist = d; best = pt; }
+  };
+  editWorkingCoords.forEach((pt, i) => { if (i !== excludeIndex) consider(pt); });
+  currentTracks.forEach(t => {
+    if (t.id === excludeTrackId) return;
+    (t.coords || []).forEach(consider);
+  });
+  return best;
+}
+
 function perpDistMeters(p, a, b) {
   const dx = b[0] - a[0], dy = b[1] - a[1];
   const lenSq = dx * dx + dy * dy;
@@ -303,6 +349,21 @@ function simplifyLngLat(coords, toleranceM) {
   const keep = new Set([0, coords.length - 1]);
   rdpKeepIndices(meters, 0, coords.length - 1, toleranceM, keep);
   return [...keep].sort((x, y) => x - y).map(i => coords[i]);
+}
+
+// Same as simplifyLngLat, but also subsets vertex_origin by the same kept
+// indices (RDP only ever keeps exact original points, so this stays index-
+// aligned with the returned coords) — used wherever a simplify result gets
+// persisted, so the move-clamp baseline survives point-count changes.
+function simplifyLngLatWithOrigin(coords, origin, toleranceM) {
+  const src = origin && origin.length === coords.length ? origin : coords;
+  if (coords.length < 3 || toleranceM <= 0) return { coords: coords.slice(), origin: src.slice() };
+  const mpd = metersPerDegreeAt(coords[0][1]);
+  const meters = coords.map(c => [c[0] * mpd.mLng, c[1] * mpd.mLat]);
+  const keep = new Set([0, coords.length - 1]);
+  rdpKeepIndices(meters, 0, coords.length - 1, toleranceM, keep);
+  const idx = [...keep].sort((a, b) => a - b);
+  return { coords: idx.map(i => coords[i]), origin: idx.map(i => src[i]) };
 }
 
 function pointToSegmentDistSq(p, a, b) {
@@ -390,9 +451,11 @@ function registerMapLayers() {
   map.on('click', 'track-edit-line-layer', e => {
     if (!editingPoints) return;
     const clickLngLat = [e.lngLat.lng, e.lngLat.lat];
-    const insertAt = nearestSegmentIndex(editWorkingCoords, clickLngLat);
-    editWorkingCoords.splice(insertAt + 1, 0, clickLngLat);
-    rebuildEditMarkers();
+    const insertAt = nearestSegmentIndex(editWorkingCoords, clickLngLat) + 1;
+    editWorkingCoords.splice(insertAt, 0, clickLngLat);
+    editVertexOrigin.splice(insertAt, 0, clickLngLat.slice()); // a new vertex's own creation point is its origin
+    pushUndo({ type: 'insert', index: insertAt, coord: clickLngLat, origin: clickLngLat.slice() });
+    rebuildEditMarkers(true);
   });
 
   // Manual-draw points — registered once, checks state internally (same
@@ -540,6 +603,7 @@ async function openProject(id, opts = {}) {
     renderTrackList();
     refreshProjectTracksSource();
     refreshProjectLocationsSource();
+    refreshHiddenOsmIds();
     if (opts.fitView !== false) fitMapToTracks();
 
     const url = new URL(location.href);
@@ -562,6 +626,7 @@ function closeProject() {
   renderTrackList();
   refreshProjectTracksSource();
   refreshProjectLocationsSource();
+  refreshHiddenOsmIds();
 
   const url = new URL(location.href);
   url.searchParams.delete('project');
@@ -628,14 +693,20 @@ function closeTrackEditor() {
 
 function setTrackEditorMessage(msg) { document.getElementById('track-editor-message').textContent = msg; }
 
-async function saveTrackGeometry(track, coords, tolerance) {
-  const { error } = await sb.from('tracks')
-    .update({ geom: toEWKT(coords), simplify_tolerance_m: tolerance })
-    .eq('id', track.id);
+// origin (optional): new vertex_origin baseline to persist alongside coords —
+// passed whenever the point count changed (point-edit save, simplify apply,
+// simplify reset) so the move-clamp's origin array stays index-aligned with
+// geom. Omitted when only re-deriving the same points (nothing calls it that
+// way today, but keeps the function honest about when origin needs updating).
+async function saveTrackGeometry(track, coords, tolerance, origin) {
+  const update = { geom: toEWKT(coords), simplify_tolerance_m: tolerance };
+  if (origin) update.vertex_origin = origin;
+  const { error } = await sb.from('tracks').update(update).eq('id', track.id);
   if (error) { setTrackEditorMessage(`Error: ${error.message}`); return; }
   track.coords = coords;
   track.geojson = { type: 'LineString', coordinates: coords };
   track.simplify_tolerance_m = tolerance;
+  if (origin) track.vertex_origin = origin;
   document.getElementById('track-simplify-slider').value = tolerance;
   document.getElementById('track-simplify-val').textContent = `${tolerance} m`;
   clearEditLineSource();
@@ -655,7 +726,69 @@ function clearEditMarkers() {
   editVertexMarkers = [];
 }
 
-function rebuildEditMarkers() {
+// ---------------------------------------------------------------------------
+// Undo/redo — in-memory, scoped to the current point-editing session only
+// (cleared on save/close, same as the existing "Reset to raw" precedent for
+// simplify — not a persisted history table). Covers move/delete/insert, the
+// three mutations that operate purely on editWorkingCoords/editVertexOrigin.
+// Split is deliberately NOT part of this stack: it commits immediately as a
+// multi-row DB write (see splitAt below), the same immediacy class as
+// "Apply"/"Delete track" already have.
+// ---------------------------------------------------------------------------
+function pushUndo(cmd) {
+  editUndoStack.push(cmd);
+  editRedoStack = [];
+  updateUndoRedoButtons();
+}
+
+function applyInverse(cmd) {
+  if (cmd.type === 'move') {
+    editWorkingCoords[cmd.index] = cmd.from.slice();
+  } else if (cmd.type === 'delete') {
+    editWorkingCoords.splice(cmd.index, 0, cmd.coord);
+    editVertexOrigin.splice(cmd.index, 0, cmd.origin);
+  } else if (cmd.type === 'insert') {
+    editWorkingCoords.splice(cmd.index, 1);
+    editVertexOrigin.splice(cmd.index, 1);
+  }
+}
+
+function applyForward(cmd) {
+  if (cmd.type === 'move') {
+    editWorkingCoords[cmd.index] = cmd.to.slice();
+  } else if (cmd.type === 'delete') {
+    editWorkingCoords.splice(cmd.index, 1);
+    editVertexOrigin.splice(cmd.index, 1);
+  } else if (cmd.type === 'insert') {
+    editWorkingCoords.splice(cmd.index, 0, cmd.coord);
+    editVertexOrigin.splice(cmd.index, 0, cmd.origin);
+  }
+}
+
+function undoEdit() {
+  const cmd = editUndoStack.pop();
+  if (!cmd) return;
+  applyInverse(cmd);
+  editRedoStack.push(cmd);
+  rebuildEditMarkers(true);
+}
+
+function redoEdit() {
+  const cmd = editRedoStack.pop();
+  if (!cmd) return;
+  applyForward(cmd);
+  editUndoStack.push(cmd);
+  rebuildEditMarkers(true);
+}
+
+function updateUndoRedoButtons() {
+  const undoBtn = document.getElementById('track-undo-btn');
+  const redoBtn = document.getElementById('track-redo-btn');
+  if (undoBtn) undoBtn.disabled = editUndoStack.length === 0;
+  if (redoBtn) redoBtn.disabled = editRedoStack.length === 0;
+}
+
+function rebuildEditMarkers(skipUndoUpdate) {
   clearEditMarkers();
   editWorkingCoords.forEach((coord, i) => {
     const el = document.createElement('div');
@@ -663,18 +796,65 @@ function rebuildEditMarkers() {
     const marker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat(coord).addTo(map);
     marker.on('dragend', () => {
       const { lng, lat } = marker.getLngLat();
-      editWorkingCoords[i] = [lng, lat];
+      const from = editWorkingCoords[i];
+      const snapped = findSnapCandidate([lng, lat], activeTrackId, i);
+      const to = clampToOrigin(snapped || [lng, lat], editVertexOrigin[i]);
+      editWorkingCoords[i] = to;
+      pushUndo({ type: 'move', index: i, from, to });
+      // Redraw at the (possibly clamped/snapped) position, not the raw drop point.
+      marker.setLngLat(to);
       setEditLineSource(editWorkingCoords);
     });
     el.addEventListener('dblclick', ev => {
       ev.stopPropagation();
       if (editWorkingCoords.length <= 2) return; // a line needs at least 2 points
-      editWorkingCoords.splice(i, 1);
-      rebuildEditMarkers();
+      const [coordC] = editWorkingCoords.splice(i, 1);
+      const [originC] = editVertexOrigin.splice(i, 1);
+      pushUndo({ type: 'delete', index: i, coord: coordC, origin: originC });
+      rebuildEditMarkers(true);
+    });
+    // Single click (not the drag) opens split/delete actions for this vertex —
+    // requires a defined direction (first vertex → last), which a track's
+    // coordinate order already gives for free.
+    el.addEventListener('click', ev => {
+      ev.stopPropagation();
+      openVertexActionsPopup(i, coord);
     });
     editVertexMarkers.push(marker);
   });
   setEditLineSource(editWorkingCoords);
+  if (!skipUndoUpdate) { editUndoStack = []; editRedoStack = []; }
+  updateUndoRedoButtons();
+}
+
+let vertexActionsPopup = null;
+
+function openVertexActionsPopup(index, coord) {
+  if (vertexActionsPopup) vertexActionsPopup.remove();
+  const canSplit = index > 0 && index < editWorkingCoords.length - 1;
+  vertexActionsPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '200px' })
+    .setLngLat(coord)
+    .setHTML(`
+      <div class="popup-trail-actions">
+        ${canSplit ? `<button id="vertex-split-before">Split before</button>
+        <button id="vertex-split-after">Split after</button>` : ''}
+        <button id="vertex-delete">Delete vertex</button>
+      </div>`)
+    .addTo(map);
+  const el = vertexActionsPopup.getElement();
+  const splitBefore = el.querySelector('#vertex-split-before');
+  const splitAfter  = el.querySelector('#vertex-split-after');
+  const delBtn      = el.querySelector('#vertex-delete');
+  if (splitBefore) splitBefore.addEventListener('click', () => { vertexActionsPopup.remove(); splitAt(index - 1); });
+  if (splitAfter)  splitAfter.addEventListener('click',  () => { vertexActionsPopup.remove(); splitAt(index); });
+  if (delBtn) delBtn.addEventListener('click', () => {
+    vertexActionsPopup.remove();
+    if (editWorkingCoords.length <= 2) return;
+    const [coordC] = editWorkingCoords.splice(index, 1);
+    const [originC] = editVertexOrigin.splice(index, 1);
+    pushUndo({ type: 'delete', index, coord: coordC, origin: originC });
+    rebuildEditMarkers(true);
+  });
 }
 
 function startEditingPoints() {
@@ -682,6 +862,9 @@ function startEditingPoints() {
   if (!track) return;
   editingPoints = true;
   editWorkingCoords = track.coords.map(c => c.slice());
+  editVertexOrigin = (track.vertex_origin || track.coords).map(c => c.slice());
+  editUndoStack = [];
+  editRedoStack = [];
   document.getElementById('track-edit-points-btn').textContent = 'Save points';
   refreshProjectTracksSource();
   rebuildEditMarkers();
@@ -693,12 +876,72 @@ function stopEditingPoints(save) {
   document.getElementById('track-edit-points-btn').textContent = 'Edit points';
   clearEditMarkers();
   clearEditLineSource();
+  editUndoStack = [];
+  editRedoStack = [];
+  updateUndoRedoButtons();
   const track = activeTrack();
   if (save && track && editWorkingCoords.length >= 2) {
-    saveTrackGeometry(track, editWorkingCoords, track.simplify_tolerance_m || 0);
+    saveTrackGeometry(track, editWorkingCoords, track.simplify_tolerance_m || 0, editVertexOrigin);
   } else {
     refreshProjectTracksSource();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Split — commits immediately as two DB writes (not part of the undo stack,
+// same immediacy class as "Apply"/"Delete track"). Requires a defined
+// direction (first vertex → last), which the coordinate order already gives.
+// The truncated head keeps the original row's id; the tail becomes a new row
+// in the same track_group_id, ordered after every existing sibling. Both
+// halves keep the same source/source_osm_* — splitting an OSM-sourced segment
+// needs no special-casing of the hidden-osm-id set, since it's carried over
+// unmodified to both rows.
+// ---------------------------------------------------------------------------
+async function splitAt(index) {
+  const track = activeTrack();
+  if (!track || index <= 0 || index >= editWorkingCoords.length - 1) return;
+  if (!confirm('Split this trail into two segments here?')) return;
+
+  const headCoords = editWorkingCoords.slice(0, index + 1);
+  const headOrigin = editVertexOrigin.slice(0, index + 1);
+  const tailCoords = editWorkingCoords.slice(index);
+  const tailOrigin = editVertexOrigin.slice(index);
+
+  const { error: updErr } = await sb.from('tracks')
+    .update({ geom: toEWKT(headCoords), vertex_origin: headOrigin })
+    .eq('id', track.id);
+  if (updErr) { alert(`Could not split: ${updErr.message}`); return; }
+
+  const groupOrders = currentTracks
+    .filter(t => t.track_group_id === track.track_group_id)
+    .map(t => t.segment_order ?? 0);
+  const nextOrder = Math.max(0, ...groupOrders) + 1;
+
+  const { data, error } = await sb.from('tracks').insert({
+    project_id: currentProject.id,
+    name: track.name ? `${track.name} (split)` : 'Split segment',
+    source: track.source,
+    geom: toEWKT(tailCoords),
+    raw_points: track.raw_points,
+    source_osm_type: track.source_osm_type,
+    source_osm_id: track.source_osm_id,
+    source_osm_way_ids: track.source_osm_way_ids || [],
+    vertex_origin: tailOrigin,
+    track_group_id: track.track_group_id,
+    segment_order: nextOrder,
+  }).select('id,name,source,simplify_tolerance_m,is_exported,created_at,source_osm_type,'
+    + 'source_osm_id,source_osm_way_ids,vertex_origin,track_group_id,segment_order,raw_points').single();
+  if (error) { alert(`Could not create the split segment: ${error.message}`); return; }
+
+  track.coords = headCoords;
+  track.geojson = { type: 'LineString', coordinates: headCoords };
+  track.vertex_origin = headOrigin;
+  currentTracks.push({ ...data, coords: tailCoords, geojson: { type: 'LineString', coordinates: tailCoords } });
+
+  stopEditingPoints(false);
+  renderTrackList();
+  refreshProjectTracksSource();
+  selectTrack(track.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -737,8 +980,10 @@ async function finishManualDraw() {
   if (coords.length < 2) return;
 
   const { data, error } = await sb.from('tracks').insert({
-    project_id: currentProject.id, name: 'New manual track', source: 'manual', geom: toEWKT(coords),
-  }).select('id,name,source,simplify_tolerance_m,is_exported,created_at').single();
+    project_id: currentProject.id, name: 'New manual track', source: 'manual',
+    geom: toEWKT(coords), vertex_origin: coords,
+  }).select('id,name,source,simplify_tolerance_m,is_exported,created_at,vertex_origin,'
+    + 'track_group_id,segment_order').single();
   if (error) { alert(`Could not save track: ${error.message}`); return; }
 
   currentTracks.push({ ...data, raw_points: null, coords, geojson: { type: 'LineString', coordinates: coords } });
@@ -746,6 +991,65 @@ async function finishManualDraw() {
   refreshProjectTracksSource();
   selectTrack(data.id);
 }
+
+// ---------------------------------------------------------------------------
+// Add from an existing OSM way/relation — called from index.html's trail
+// popup, which does the OSM-specific work (fragment collection across clipped
+// vector tiles, then stitching them into one ordered line — see
+// stitchFragments in index.html) and hands this plain data across. Exposed as
+// a global the same way index.html exposes window.onTracksAuthChange to this
+// file, just in the other direction.
+//
+// wayIds is every fragment's own way-level osm_id (never a relation id, since
+// line features don't carry one) — this becomes source_osm_way_ids, which
+// drives which OSM ways get hidden from the base map layers while this
+// segment exists (see refreshHiddenOsmIds/applyHiddenOsmIdsFilter below).
+// ---------------------------------------------------------------------------
+window.addTrackFromOsmWay = async function (coords, identity, wayIds) {
+  if (!currentProject || !currentSession) { alert('Open a project and log in first.'); return; }
+  if (!coords || coords.length < 2) return;
+
+  const { data, error } = await sb.from('tracks').insert({
+    project_id: currentProject.id,
+    name: identity.osm_type === 'relation' ? 'Imported OSM route' : 'Imported OSM way',
+    source: 'osm_way',
+    geom: toEWKT(coords),
+    vertex_origin: coords,
+    source_osm_type: identity.osm_type,
+    source_osm_id: identity.osm_id,
+    source_osm_way_ids: wayIds || [],
+  }).select('id,name,source,simplify_tolerance_m,is_exported,created_at,source_osm_type,'
+    + 'source_osm_id,source_osm_way_ids,vertex_origin,track_group_id,segment_order').single();
+  if (error) { alert(`Could not import trail: ${error.message}`); return; }
+
+  currentTracks.push({ ...data, raw_points: null, coords, geojson: { type: 'LineString', coordinates: coords } });
+  renderTrackList();
+  refreshProjectTracksSource();
+  refreshHiddenOsmIds();
+  selectTrack(data.id);
+};
+
+// Every way-level osm_id belonging to an osm_way-sourced track in the open
+// project should be hidden from the base OSM line layers (index.html defines
+// OSM_TRAIL_LINE_LAYERS and applies the filter here computes) — otherwise the
+// copied-for-editing trail would render twice, once as the live OSM way and
+// once as the editable segment. Called after opening/closing a project and
+// after any track insert/delete/split that could change the set.
+function refreshHiddenOsmIds() {
+  hiddenOsmWayIds = new Set(
+    currentTracks.filter(t => t.source === 'osm_way').flatMap(t => t.source_osm_way_ids || [])
+  );
+  applyHiddenOsmIdsFilter();
+}
+
+function applyHiddenOsmIdsFilter() {
+  if (typeof OSM_TRAIL_LINE_LAYERS === 'undefined') return; // index.html not loaded yet
+  const expr = hiddenOsmWayIds.size
+    ? ['!', ['in', ['get', 'osm_id'], ['literal', [...hiddenOsmWayIds]]]]
+    : null;
+  OSM_TRAIL_LINE_LAYERS.forEach(id => { if (map.getLayer(id)) map.setFilter(id, expr); });
+}
+window.applyHiddenOsmIdsFilter = applyHiddenOsmIdsFilter;
 
 // ---------------------------------------------------------------------------
 // FIT import — parse, show an elevation-profile chunk picker, save a chunk as
@@ -860,8 +1164,10 @@ async function addFitChunkAsTrack() {
   statusEl.textContent = 'Saving…';
 
   const { data, error } = await sb.from('tracks').insert({
-    project_id: currentProject.id, name, source: 'fit_upload', geom: toEWKT(coords), raw_points: slice,
-  }).select('id,name,source,simplify_tolerance_m,is_exported,created_at').single();
+    project_id: currentProject.id, name, source: 'fit_upload', geom: toEWKT(coords),
+    raw_points: slice, vertex_origin: coords,
+  }).select('id,name,source,simplify_tolerance_m,is_exported,created_at,vertex_origin,'
+    + 'track_group_id,segment_order').single();
   if (error) { statusEl.textContent = `Error: ${error.message}`; return; }
 
   currentTracks.push({ ...data, raw_points: slice, coords, geojson: { type: 'LineString', coordinates: coords } });
@@ -908,6 +1214,44 @@ function exportTrackGPX(track) {
   downloadText(`${(track.name || 'track').replace(/[^a-z0-9_-]+/gi, '_')}.gpx`, trackToGPX(track), 'application/gpx+xml');
   const tags = [`highway=path`, `mtb=yes`, track.name ? `name=${track.name}` : null, `mtb:scale=`].filter(Boolean).join('\n');
   alert(`GPX downloaded. Suggested OSM tags for JOSM/iD (fill in mtb:scale yourself):\n\n${tags}`);
+}
+
+// ---------------------------------------------------------------------------
+// OSM export — same "generate exportable data, upload manually via JOSM" scope
+// decision as trackToGPX/exportTrackGPX above, not a server round trip and not
+// an attempt at action="modify"/version reconciliation against a real OSM way
+// (this schema never fetches/stores a live version number, which JOSM needs to
+// merge correctly) — always emits fresh negative-id nodes + one negative-id
+// way, and when the segment came from OSM, tells the human reviewer the
+// original id so they can cross-reference/merge manually in JOSM themselves.
+// ---------------------------------------------------------------------------
+function trackToOSMXML(track) {
+  let nextId = -1;
+  const nodeIds = track.coords.map(() => nextId--);
+  const nodes = track.coords.map(([lng, lat], i) =>
+    `  <node id="${nodeIds[i]}" lat="${lat}" lon="${lng}" version="1" />`).join('\n');
+  const wayId = nextId;
+  const refs = nodeIds.map(id => `    <nd ref="${id}" />`).join('\n');
+  const tags = [
+    ['highway', 'path'],
+    ['mtb', 'yes'],
+    track.name ? ['name', track.name] : null,
+    ['mtb:scale', ''],
+  ].filter(Boolean).map(([k, v]) => `    <tag k="${k}" v="${escapeHtml(v)}" />`).join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<osm version="0.6" generator="mtb-editor">\n${nodes}\n` +
+    `  <way id="${wayId}" version="1">\n${refs}\n${tags}\n  </way>\n</osm>`;
+}
+
+function exportTrailSegmentOSM(track) {
+  downloadText(`${(track.name || 'trail').replace(/[^a-z0-9_-]+/gi, '_')}.osm`, trackToOSMXML(track), 'application/xml');
+  let msg = 'OSM XML downloaded — open it in JOSM (File > Open), review, then upload.';
+  if (track.source_osm_type && track.source_osm_id != null) {
+    msg += `\n\nThis segment started from an existing OSM ${track.source_osm_type} `
+      + `(id ${track.source_osm_id}) — cross-reference/merge with it manually in JOSM, `
+      + `this export does not attempt to diff against the live version.`;
+  }
+  alert(msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,12 +1638,14 @@ function wireUI() {
     const track = activeTrack();
     if (!track) return;
     const tol = parseFloat(document.getElementById('track-simplify-slider').value);
-    saveTrackGeometry(track, simplifyLngLat(track.coords, tol), tol);
+    const { coords, origin } = simplifyLngLatWithOrigin(track.coords, track.vertex_origin, tol);
+    saveTrackGeometry(track, coords, tol, origin);
   });
   document.getElementById('track-simplify-reset').addEventListener('click', () => {
     const track = activeTrack();
     if (!track || !track.raw_points) return;
-    saveTrackGeometry(track, track.raw_points.map(p => [p.lng, p.lat]), 0);
+    const coords = track.raw_points.map(p => [p.lng, p.lat]);
+    saveTrackGeometry(track, coords, 0, coords);
   });
 
   document.getElementById('track-edit-points-btn').addEventListener('click', () => {
@@ -1322,6 +1668,18 @@ function wireUI() {
     const track = activeTrack();
     if (track) exportTrackGPX(track);
   });
+  document.getElementById('track-export-osm-btn').addEventListener('click', () => {
+    const track = activeTrack();
+    if (track) exportTrailSegmentOSM(track);
+  });
+
+  document.getElementById('track-undo-btn').addEventListener('click', undoEdit);
+  document.getElementById('track-redo-btn').addEventListener('click', redoEdit);
+  document.addEventListener('keydown', e => {
+    if (!editingPoints || !(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
+    e.preventDefault();
+    if (e.shiftKey) redoEdit(); else undoEdit();
+  });
 
   document.getElementById('track-delete-btn').addEventListener('click', async () => {
     const track = activeTrack();
@@ -1332,6 +1690,7 @@ function wireUI() {
     currentTracks = currentTracks.filter(t => t.id !== track.id);
     closeTrackEditor();
     refreshProjectTracksSource();
+    refreshHiddenOsmIds();
   });
 
   document.getElementById('track-editor-close').addEventListener('click', closeTrackEditor);

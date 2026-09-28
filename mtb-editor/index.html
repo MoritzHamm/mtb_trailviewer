@@ -163,9 +163,14 @@
         <button id="track-edit-points-btn">Edit points</button>
         <button id="track-comments-btn">Comments</button>
       </div>
+      <div class="track-editor-actions" title="Undo/redo point edits (Ctrl+Z / Ctrl+Shift+Z) — resets on save or close">
+        <button id="track-undo-btn" disabled>Undo</button>
+        <button id="track-redo-btn" disabled>Redo</button>
+      </div>
       <div class="track-editor-actions">
         <button id="track-bulk-photos-btn">Bulk upload photos</button>
         <button id="track-export-gpx-btn">Export GPX</button>
+        <button id="track-export-osm-btn">Export OSM</button>
       </div>
       <div class="track-editor-actions">
         <button id="track-mark-exported-btn">Mark exported</button>
@@ -1169,6 +1174,42 @@ const CLICKABLE_LINE_LAYERS = [
   'osm-waterway', 'osm-railway', 'osm-power', 'osm-natural-lines',
 ];
 
+// Layers whose features can qualify as a trail (see getTrailIdentity) and so
+// might need hiding once copied into an editable segment — see tracks.js's
+// refreshHiddenOsmIds/applyHiddenOsmIdsFilter, which filters these by osm_id.
+// Includes the casing layer (unlike CLICKABLE_LINE_LAYERS above) since hiding
+// a way should hide its full rendering, not just the fill.
+const OSM_TRAIL_LINE_LAYERS = ['osm-road-casing', 'osm-road-fill', 'osm-track', 'osm-path'];
+
+// Greedy nearest-endpoint chaining of clipped vector-tile fragments (sharing
+// one osm_id/relation identity) into a single ordered coordinate array — see
+// mtb-editor/CLAUDE.md's "Add from OSM way" writeup. ~2m tolerance for "same
+// point" since fragments are clipped at tile boundaries, not hand-drawn.
+const STITCH_EPS_DEG = 0.00002;
+function stitchFragments(fragments) {
+  const closeEnough = (a, b) =>
+    Math.abs(a[0] - b[0]) < STITCH_EPS_DEG && Math.abs(a[1] - b[1]) < STITCH_EPS_DEG;
+  let chains = fragments.map(f => f.geometry.coordinates.slice());
+  if (chains.length === 0) return { coords: [], leftover: 0 };
+  let chain = chains.shift();
+  let progressed = true;
+  while (chains.length && progressed) {
+    progressed = false;
+    for (let i = 0; i < chains.length; i++) {
+      const c = chains[i];
+      if (closeEnough(chain[chain.length - 1], c[0])) chain = chain.concat(c.slice(1));
+      else if (closeEnough(chain[chain.length - 1], c[c.length - 1])) chain = chain.concat(c.slice(0, -1).reverse());
+      else if (closeEnough(chain[0], c[c.length - 1])) chain = c.slice(0, -1).concat(chain);
+      else if (closeEnough(chain[0], c[0])) chain = c.slice(1).reverse().concat(chain);
+      else continue;
+      chains.splice(i, 1);
+      progressed = true;
+      break;
+    }
+  }
+  return { coords: chain, leftover: chains.length };
+}
+
 function featureLabel(props) {
   // Priority: the way's own name > the route relation's name (many named
   // trails are split into anonymous segments — the relation is often the
@@ -1339,6 +1380,7 @@ map.on('click', e => {
       ? `<div class="popup-trail-actions">
            <button id="popup-trail-history">Trail history</button>
            <button id="popup-add-point-entry">Add entry at this point</button>
+           <button id="popup-add-osm-segment">Add to project as editable segment</button>
          </div>`
       : `<div class="popup-trail-hint">Log in to add trail entries</div>`;
   }
@@ -1412,6 +1454,21 @@ map.on('click', e => {
     if (pointBtn) pointBtn.addEventListener('click', () => {
       featurePopup.remove();
       openEntryForm({ identity, props: f.properties, label, location: e.lngLat, clickPoint: e.lngLat });
+    });
+    const osmSegBtn = popupEl.querySelector('#popup-add-osm-segment');
+    if (osmSegBtn) osmSegBtn.addEventListener('click', () => {
+      featurePopup.remove();
+      const { coords, leftover } = stitchFragments(fragments);
+      if (coords.length < 2) {
+        alert('Could not reassemble this trail — not enough geometry currently in view.');
+        return;
+      }
+      if (leftover > 0) {
+        alert(`Note: ${leftover} disconnected piece(s) of this trail weren't included — `
+          + `pan closer to see the whole thing, then add it again if needed.`);
+      }
+      const wayIds = [...new Set(fragments.map(ff => ff.properties.osm_id).filter(id => id != null))];
+      if (window.addTrackFromOsmWay) window.addTrackFromOsmWay(coords, identity, wayIds);
     });
   }
 });
@@ -2064,6 +2121,11 @@ map.on('load', () => {
   // The peak layers just added didn't exist yet at 'style.load', so they
   // missed that visibility pass — apply it once more now that they're here.
   applyOsmVisibility(OSM_LINE_LAYERS, loadSetting('osmLines'));
+
+  // Style/layer reloads reset setFilter too — reassert which OSM ways are
+  // hidden for in-progress editable segments (tracks.js, loaded after this
+  // script but already executed by the time this async 'load' event fires).
+  if (window.applyHiddenOsmIdsFilter) window.applyHiddenOsmIdsFilter();
 
   if (loadSetting('terrain3d')) {
     map.setTerrain({ source: 'terrain', exaggeration: parseInt(vertSlider.value) / 10 });
