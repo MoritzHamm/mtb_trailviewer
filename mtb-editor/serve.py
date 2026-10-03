@@ -19,7 +19,7 @@ import shutil
 import sys
 import urllib.error
 import urllib.request
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
 REMOTE_BASE = os.environ.get("TILES_REMOTE_BASE", "https://dalarna-mtb.hammer-tour.com")
@@ -144,4 +144,11 @@ if __name__ == "__main__":
     os.chdir(directory)
     print(f"Serving {directory}/ on http://localhost:{port}")
     print("Ctrl-C to stop.\n")
-    HTTPServer(("", port), RangeHTTPRequestHandler).serve_forever()
+    # Plain HTTPServer is single-threaded (one connection at a time, 5-deep
+    # backlog) — a map viewer fires 6+ concurrent tile requests per pan/zoom,
+    # which overflows that under load: Chrome gets outright connection
+    # refusals ("Failed to fetch"), Firefox's requests queue long enough to
+    # get cancelled by the next pan ("AbortError"). ThreadingHTTPServer
+    # handles each connection on its own thread, same stdlib module, no new
+    # dependency.
+    ThreadingHTTPServer(("", port), RangeHTTPRequestHandler).serve_forever()

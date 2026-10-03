@@ -6,11 +6,17 @@
   <title>Terrain Viewer</title>
   <script src="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.js"></script>
   <link   href="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.css" rel="stylesheet">
-  <script src="https://unpkg.com/pmtiles@3.2.0/dist/pmtiles.js"></script>
+  <!-- 3.2.0 was missing several request-cancellation fixes landed in 4.x
+       (4.1.0/4.3.1/4.5.0: properly abort pending directory/tile requests on
+       cancellation instead of leaving a read half-consumed) — surfaced as
+       "Invalid data: incorrect header check" + aborted-operation errors under
+       heavy pan/zoom, across every PMTiles source in the app, not just one. -->
+  <script src="https://unpkg.com/pmtiles@4.5.0/dist/pmtiles.js"></script>
   <!-- Canvas 2D surfaces store pixels premultiplied by alpha internally, no
        matter the compositing mode — any pixel with alpha=0 permanently loses
-       its RGB the instant it's drawn, which is fatal here since wetness is
-       packed into the alpha channel as plain data, not real transparency.
+       its RGB the instant it's drawn. Only terrain-RGB/slope tiles need this
+       decode path now (exact-byte fidelity, see mtb-editor/CLAUDE.md) — the
+       overlay tiles moved off alpha entirely and no longer need it.
        pako + UPNG.js decode PNG bytes directly, bypassing canvas entirely. -->
   <script src="https://unpkg.com/pako@2.1.0/dist/pako.min.js"></script>
   <script src="https://unpkg.com/upng-js@2.1.0/UPNG.js"></script>
@@ -73,14 +79,10 @@
     <input type="checkbox" id="toggle-3d">
   </div>
 
-  <div class="toggle-row">
-    <label for="toggle-osm-lines">OSM lines</label>
-    <input type="checkbox" id="toggle-osm-lines" checked>
-  </div>
-
-  <div class="toggle-row">
-    <label for="toggle-osm-areas">OSM areas</label>
-    <input type="checkbox" id="toggle-osm-areas">
+  <div class="toggle-row" style="position:relative">
+    <label>Map layers</label>
+    <button id="osm-layers-btn" type="button" class="dropdown-btn">▾</button>
+    <div id="osm-layers-panel" class="dropdown-panel" style="display:none"></div>
   </div>
 
   <div class="toggle-row">
@@ -344,7 +346,57 @@ const GLYPHS_BASE  = IS_LOCAL ? 'http://localhost:8080/fonts' : '/fonts';
 
 // Register PMTiles protocol so MapLibre can read .pmtiles files directly
 const pmtilesProtocol = new pmtiles.Protocol();
-maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile.bind(pmtilesProtocol));
+
+// Temporary diagnostics for the intermittent "incorrect header check" /
+// aborted-request crash — logging (not breakpoints) on purpose: this looks
+// like a race condition, and pausing execution to inspect it can change the
+// very timing that causes it. Gives a real in-flight-request timeline instead
+// of a single library-internal stack trace with no request context. Remove
+// once the bug's actually found — this isn't meant to stay.
+let __reqSeq = 0;
+function logTileRequest(label, url) {
+  const id = ++__reqSeq;
+  const t0 = performance.now();
+  console.log(`[tile ${id}] ${label} start  ${url}  t=${t0.toFixed(1)}`);
+  return (ok, extra) => {
+    console.log(`[tile ${id}] ${label} ${ok ? 'ok' : 'FAIL'}  ${url}  `
+      + `+${(performance.now() - t0).toFixed(1)}ms${extra ? '  ' + extra : ''}`);
+  };
+}
+window.addEventListener('error', e => {
+  console.log(`[GLOBAL ERROR] ${e.message}  @ t=${performance.now().toFixed(1)}`, e.error);
+});
+window.addEventListener('unhandledrejection', e => {
+  console.log(`[UNHANDLED REJECTION] @ t=${performance.now().toFixed(1)}`, e.reason);
+});
+
+// Diagnosis (from a captured request-timeline log): every failure was a
+// dalarna.pmtiles Z16 tile — that archive's tippecanoe max-zoom, so the
+// densest/slowest tiles to fetch+decompress — getting genuinely cancelled by
+// MapLibre mid-flight during fast panning (completely normal: the tile just
+// isn't needed anymore). PMTiles correctly reports that as an AbortError, but
+// MapLibre doesn't recognize this particular custom-protocol rejection shape
+// as an expected cancellation and fires it through its own error pipeline
+// anyway (the "DOMException: aborted, evented.ts" console spam) — the actual
+// "incorrect header check" browser warning is just Firefox's
+// DecompressionStream producing an ugly message when its input is cut off
+// mid-read by that same cancellation, not real data corruption. Swallow
+// AbortError here (hand back an empty tile, same as "not found") so
+// MapLibre's error pipeline never fires for this expected case; anything
+// else still propagates normally.
+const rawPmtilesTile = pmtilesProtocol.tile.bind(pmtilesProtocol);
+maplibregl.addProtocol('pmtiles', async (params, ...rest) => {
+  const done = logTileRequest('pmtiles', params.url);
+  try {
+    const result = await rawPmtilesTile(params, ...rest);
+    done(true, `bytes=${result && result.data ? result.data.byteLength : 'n/a'}`);
+    return result;
+  } catch (err) {
+    done(false, String(err));
+    if (err && err.name === 'AbortError') return { data: new ArrayBuffer(0) };
+    throw err;
+  }
+});
 
 // Shared PMTiles instance for terrain — reused by the slope protocol below
 const terrainTiles  = new pmtiles.PMTiles(`${TILE_BASE}/terrain.pmtiles`);
@@ -380,10 +432,12 @@ function slopeColor(deg) {
 // and colors it per VIEWER_STYLE.slope.stops (see style-config.js)
 // ---------------------------------------------------------------------------
 maplibregl.addProtocol('slope', async (params) => {
+  const done = logTileRequest('slope(terrainTiles)', params.url);
   try {
     const [z, x, y] = params.url.replace('slope://', '').split('/').map(Number);
     const tile = await terrainTiles.getZxy(z, x, y);
     if (!tile) throw new Error('not found');
+    done(true);
     // Decode with UPNG (not canvas) — see the wetness/vegheight protocol
     // below for why canvas-based decoding is unsafe for these tiles.
     const S = 256;
@@ -420,7 +474,8 @@ maplibregl.addProtocol('slope', async (params) => {
     dstCanvas.getContext('2d').putImageData(out, 0, 0);
     const blob = await dstCanvas.convertToBlob({ type: 'image/png' });
     return { data: await blob.arrayBuffer() };
-  } catch (_) {
+  } catch (err) {
+    done(false, String(err));
     return { data: new ArrayBuffer(0) };
   }
 });
@@ -446,13 +501,29 @@ maplibregl.addProtocol('slope', async (params) => {
 const vegheightTiles = new pmtiles.PMTiles(`${TILE_BASE}/vegheight.pmtiles`);
 const wetnessTiles   = new pmtiles.PMTiles(`${TILE_BASE}/wetness.pmtiles`);
 
-function makeGrayscaleProtocol(tileset, colorLow, colorHigh) {
-  return async (params) => {
-    const proto = params.url.split('://')[0];
-    const [z, x, y] = params.url.replace(`${proto}://`, '').split('/').map(Number);
+const OVERLAY_MAX_ZOOM = 16; // vegheight/wetness archives only go this far (generate_overlay_tiles.py)
+
+// Per-tile request cache/dedup — at deep zoom (>OVERLAY_MAX_ZOOM), many
+// different on-screen "virtual" tiles all resolve to the same underlying
+// archive tile, so MapLibre can fire several concurrent requests for the
+// exact same (z,x,y) in a burst. Without this, each one independently calls
+// into the shared PMTiles instance at once; caching the in-flight promise
+// means concurrent duplicates share one real getZxy call instead of racing
+// each other (a very plausible trigger for a concurrency bug in the PMTiles
+// library's internal directory-cache handling — this class of error was only
+// ever observed at deep zoom, exactly where duplicate bursts are worst). Also
+// makes re-panning back over already-seen tiles instant. No eviction: a
+// session's worth of viewed tiles at a few KB (WebP) each stays small enough
+// not to matter.
+function makeGrayscaleProtocol(tileset, colorLow, colorHigh, label) {
+  const cache = new Map(); // "z/x/y" -> Promise<ArrayBuffer> (recolored PNG bytes)
+
+  async function loadAndRecolor(z, x, y) {
+    const done = logTileRequest(label, `${z}/${x}/${y}`);
     try {
       const tile = await tileset.getZxy(z, x, y);
       if (!tile) throw new Error('not found');
+      done(true);
       const S = 256;
       const bitmap = await createImageBitmap(new Blob([tile.data], { type: 'image/webp' }));
       const srcCanvas = new OffscreenCanvas(S, S);
@@ -471,17 +542,40 @@ function makeGrayscaleProtocol(tileset, colorLow, colorHigh) {
       const dstCanvas = new OffscreenCanvas(S, S);
       dstCanvas.getContext('2d').putImageData(out, 0, 0);
       const blob = await dstCanvas.convertToBlob({ type: 'image/png' });
-      return { data: await blob.arrayBuffer() };
-    } catch (_) {
-      return { data: new ArrayBuffer(0) };
+      return await blob.arrayBuffer();
+    } catch (err) {
+      done(false, String(err));
+      return new ArrayBuffer(0);
     }
+  }
+
+  return async (params) => {
+    const proto = params.url.split('://')[0];
+    let [z, x, y] = params.url.replace(`${proto}://`, '').split('/').map(Number);
+    if (z > OVERLAY_MAX_ZOOM) {
+      // Belt-and-suspenders: the source's maxzoom (see 'wetness-tiles'/
+      // 'vegheight-tiles' above) is supposed to make MapLibre overzoom the
+      // archive's real max-zoom tile instead of ever requesting one past it,
+      // but don't rely on that alone for a custom-protocol raster source —
+      // clamp to the real ancestor tile ourselves so this protocol is correct
+      // no matter what MapLibre actually requests.
+      console.log(`${proto}:// clamped z${z} -> z${OVERLAY_MAX_ZOOM} (${x},${y})`);
+      const shift = z - OVERLAY_MAX_ZOOM;
+      x = x >> shift; y = y >> shift; z = OVERLAY_MAX_ZOOM;
+    }
+    const key = `${z}/${x}/${y}`;
+    if (!cache.has(key)) cache.set(key, loadAndRecolor(z, x, y));
+    const buf = await cache.get(key);
+    // A fresh copy per caller — MapLibre may treat the returned buffer as
+    // transferable, and multiple callers are sharing this one cache entry.
+    return { data: buf.slice(0) };
   };
 }
 
 maplibregl.addProtocol('wetness',
-  makeGrayscaleProtocol(wetnessTiles, VIEWER_STYLE.wetness.colorLow, VIEWER_STYLE.wetness.colorHigh));
+  makeGrayscaleProtocol(wetnessTiles, VIEWER_STYLE.wetness.colorLow, VIEWER_STYLE.wetness.colorHigh, 'wetness'));
 maplibregl.addProtocol('vegheight',
-  makeGrayscaleProtocol(vegheightTiles, VIEWER_STYLE.vegheight.colorLow, VIEWER_STYLE.vegheight.colorHigh));
+  makeGrayscaleProtocol(vegheightTiles, VIEWER_STYLE.vegheight.colorLow, VIEWER_STYLE.vegheight.colorHigh, 'vegheight'));
 
 const CENTER_LNG = 14.445;   // full Dalarna region
 const CENTER_LAT = 61.005;
@@ -494,7 +588,12 @@ const START_ZOOM = 8;
 const DEFAULTS = {
   azimuth: 315, altitude: 35, exaggeration: 6,
   terrain3d: false, vertEx: 15,
-  background: 'osm', osmLines: true, osmAreas: false, trailView: false,
+  background: 'osm', trailView: false,
+  // Per-category map-layer visibility (see OSM_CATEGORIES) — matches the old
+  // "OSM lines" (true) / "OSM areas" (false) split: former lines-ish
+  // categories default on, former areas-ish (fills) default off.
+  osmCat_tracks: true, osmCat_waterways: true, osmCat_otherLines: true,
+  osmCat_vegetation: false, osmCat_water: false, osmCat_others: true,
   viewLng: CENTER_LNG, viewLat: CENTER_LAT, viewZoom: START_ZOOM,
   viewBearing: 0, viewPitch: 0,
 };
@@ -638,9 +737,19 @@ const map = new maplibregl.Map({
             VIEWER_STYLE.osm.landuse.fallback,
           ], 'fill-opacity': VIEWER_STYLE.osm.landuse.opacity },
       },
-      // Water polygons
+      // Water polygons — real open water only (lakes/bays/straits). Wetlands
+      // (swamp/marsh, natural=wetland) are excluded here and drawn instead by
+      // osm-wetland-pattern below, over their existing osm-landuse tint.
       { id: 'osm-water', type: 'fill', source: 'osmvec', 'source-layer': 'water', minzoom: 6,
+        filter: ['!=', ['get', 'natural'], 'wetland'],
         paint: { 'fill-color': VIEWER_STYLE.osm.water.color, 'fill-opacity': VIEWER_STYLE.osm.water.opacity },
+      },
+      // Wetlands — dashed pattern (see map.addImage('wetland-dashes', ...))
+      // drawn over osm-landuse's own wetland tint, which used to be invisible,
+      // masked under osm-water's old flat color covering wetlands too.
+      { id: 'osm-wetland-pattern', type: 'fill', source: 'osmvec', 'source-layer': 'water', minzoom: 6,
+        filter: ['==', ['get', 'natural'], 'wetland'],
+        paint: { 'fill-pattern': 'wetland-dashes' },
       },
       // Buildings
       { id: 'osm-buildings', type: 'fill', source: 'osmvec', 'source-layer': 'buildings', minzoom: 14,
@@ -753,8 +862,11 @@ const map = new maplibregl.Map({
           ],
         },
       },
-      // Waterways
+      // Waterways — excludes waterway=flowline (a directional flow indicator
+      // within wetlands/deltas, not a real mapped watercourse) — technically
+      // useful data but reads as visual noise on this map.
       { id: 'osm-waterway', type: 'line', source: 'osmvec', 'source-layer': 'waterways', minzoom: 11,
+        filter: ['!=', ['get', 'waterway'], 'flowline'],
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: { 'line-color': VIEWER_STYLE.osm.waterway.color, 'line-width': ['interpolate', ['linear'], ['zoom'],
           11, 0.5, 14, 1.5, 16, 2.5], 'line-opacity': VIEWER_STYLE.osm.waterway.opacity },
@@ -853,8 +965,47 @@ const map = new maplibregl.Map({
 // zoom, no need for a second control.
 map.addControl(new maplibregl.NavigationControl({ showZoom: false, showCompass: true, visualizePitch: true }), 'bottom-right');
 
-// Apply saved settings (background choice, OSM line/area visibility, sun
-// angle) to the style right after it's parsed — 'style.load' fires as soon as
+// Map-layer categories — replaces the old blunt "OSM lines"/"OSM areas" pair
+// with one checkbox per feature group (see #osm-layers-panel). Each category
+// is just a named group of existing layer ids; grouping choices: natural
+// linear features (cliffs/ridges) went in with railways/powerlines as "Other
+// lines" rather than a category of their own, and buildings/peaks/places are
+// the "Others" catch-all — revisit if any of these end up wanting independent
+// toggles.
+const OSM_CATEGORIES = [
+  { key: 'tracks',     label: 'Tracks',           layers: ['osm-road-casing', 'osm-road-fill', 'osm-track', 'osm-path'] },
+  { key: 'waterways',  label: 'Waterways',        layers: ['osm-waterway'] },
+  { key: 'otherLines', label: 'Other lines',      layers: ['osm-railway', 'osm-power', 'osm-natural-lines'] },
+  { key: 'vegetation', label: 'Vegetation areas', layers: ['osm-landuse'] },
+  { key: 'water',      label: 'Water areas',      layers: ['osm-water', 'osm-wetland-pattern'] },
+  { key: 'others',     label: 'Others',           layers: ['osm-buildings', 'osm-peaks-tri', 'osm-peaks-label', 'osm-places'] },
+];
+
+function applyAllOsmCategories() {
+  OSM_CATEGORIES.forEach(cat => applyOsmVisibility(cat.layers, loadSetting('osmCat_' + cat.key)));
+}
+
+// Tileable dashed-line pattern for wetlands (swamp/marsh) — two short
+// horizontal dashes per tile, the standard topo-map marsh symbol. Transparent
+// background so osm-landuse's existing wetland tint shows through underneath
+// (see osm-wetland-pattern's comment) rather than needing its own fill color.
+function addWetlandPatternImage() {
+  if (map.hasImage('wetland-dashes')) return;
+  const { dashColor, dashAlpha, tileSize: sz } = VIEWER_STYLE.osm.wetlandPattern;
+  const [dr, dg, db] = hexToRgb(dashColor);
+  const data = new Uint8ClampedArray(sz * sz * 4);
+  const setPx = (x, y, a) => {
+    const i = (y * sz + x) * 4;
+    data[i] = dr; data[i + 1] = dg; data[i + 2] = db; data[i + 3] = a;
+  };
+  const dashRow = (y, x0, x1) => { for (let x = x0; x < x1; x++) setPx(x, y, dashAlpha); };
+  dashRow(Math.round(sz * 0.3), Math.round(sz * 0.15), Math.round(sz * 0.65));
+  dashRow(Math.round(sz * 0.75), Math.round(sz * 0.4), Math.round(sz * 0.9));
+  map.addImage('wetland-dashes', { width: sz, height: sz, data });
+}
+
+// Apply saved settings (background choice, OSM layer visibility, sun angle)
+// to the style right after it's parsed — 'style.load' fires as soon as
 // layers/sources are registered, well before 'load' (which waits for the
 // initial viewport's tiles to actually render, possibly a while at a broad
 // zoomed-out view). The style itself stays a plain declarative default; this
@@ -863,8 +1014,8 @@ map.on('style.load', () => {
   updateHillshade();
   applyAltitude();
   applyBackground(loadSetting('background'));
-  applyOsmVisibility(OSM_LINE_LAYERS, loadSetting('osmLines'));
-  applyOsmVisibility(OSM_AREA_LAYERS, loadSetting('osmAreas'));
+  addWetlandPatternImage();
+  applyAllOsmCategories();
   trailViewMode = loadSetting('trailView');
   applyTrailViewMode(trailViewMode);
 });
@@ -889,8 +1040,6 @@ const exSlider   = document.getElementById('exaggeration');
 const vertSlider = document.getElementById('vert-ex');
 const toggle3d   = document.getElementById('toggle-3d');
 const bgSelect   = document.getElementById('bg-select');
-const toggleOsmLines = document.getElementById('toggle-osm-lines');
-const toggleOsmAreas = document.getElementById('toggle-osm-areas');
 const toggleTrailView = document.getElementById('toggle-trail-view');
 const azVal      = document.getElementById('az-val');
 const altVal     = document.getElementById('alt-val');
@@ -904,8 +1053,6 @@ exSlider.value   = loadSetting('exaggeration');
 vertSlider.value = loadSetting('vertEx');
 toggle3d.checked    = loadSetting('terrain3d');
 bgSelect.value      = loadSetting('background');
-toggleOsmLines.checked = loadSetting('osmLines');
-toggleOsmAreas.checked = loadSetting('osmAreas');
 toggleTrailView.checked = loadSetting('trailView');
 
 // Sync display labels to restored values
@@ -1116,7 +1263,15 @@ function zoomStatus() {
 // scale-dependent 70-540m at Z12, nowhere near correct. Sampling the tile
 // ourselves (same trusted decode path as the slope shader) sidesteps both bugs.
 const ELEVATION_ZOOM = 17;   // terrain source's actual maxzoom — always use the best data, independent of camera zoom
-let elevTileCache = null;    // { key: 'z/x/y', data: Uint8Array } — avoids redecoding on every mousemove within the same tile
+// { key: 'z/x/y', promise: Promise<Uint8Array|null> } — caches the in-flight
+// PROMISE, not just the resolved value. mousemove fires far faster than one
+// tile fetch+decode can complete, so without this, every mousemove landing in
+// a not-yet-cached tile independently sees an empty cache and kicks off its
+// own redundant fetch — a classic cache-miss stampede (confirmed via the
+// tile-request logging: 5+ identical concurrent fetches for the same tile
+// within ~80ms). Setting the promise synchronously, before any await, means
+// every concurrent call in the same tile shares this one fetch instead.
+let elevTileCache = null;
 
 async function sampleElevation(lng, lat) {
   const n = Math.pow(2, ELEVATION_ZOOM);
@@ -1126,15 +1281,21 @@ async function sampleElevation(lng, lat) {
   const tx = Math.floor(xFrac), ty = Math.floor(yFrac);
   const key = `${tx}/${ty}`;
 
-  let data;
-  if (elevTileCache && elevTileCache.key === key) {
-    data = elevTileCache.data;
-  } else {
-    const tile = await terrainTiles.getZxy(ELEVATION_ZOOM, tx, ty);
-    if (!tile) return null;
-    data = new Uint8Array(UPNG.toRGBA8(UPNG.decode(tile.data))[0]);
-    elevTileCache = { key, data };
+  if (!elevTileCache || elevTileCache.key !== key) {
+    elevTileCache = {
+      key,
+      promise: (async () => {
+        const done = logTileRequest('elevation(terrainTiles)', `${ELEVATION_ZOOM}/${tx}/${ty}`);
+        const tile = await terrainTiles.getZxy(ELEVATION_ZOOM, tx, ty);
+        done(!!tile);
+        if (!tile) return null;
+        return new Uint8Array(UPNG.toRGBA8(UPNG.decode(tile.data))[0]);
+      })(),
+    };
   }
+
+  const data = await elevTileCache.promise;
+  if (!data) return null;
 
   const S = 256;
   const px = Math.min(S - 1, Math.floor((xFrac - tx) * S));
@@ -2014,19 +2175,10 @@ document.getElementById('bg-select').addEventListener('change', e => {
 });
 
 // ---------------------------------------------------------------------------
-// OSM vector toggles — lines/points (trails, roads, waterways, buildings,
-// peaks, labels) vs. areas (forest/landuse/water fills, which visually fight
-// the LiDAR-based hillshade and are the ones worth turning off)
+// Map layers dropdown — one checkbox per OSM_CATEGORIES entry (see its
+// definition/comment above, near style.load), replacing the old blunt "OSM
+// lines"/"OSM areas" pair.
 // ---------------------------------------------------------------------------
-const OSM_LINE_LAYERS = [
-  'osm-road-casing','osm-road-fill','osm-track','osm-path',
-  'osm-waterway','osm-railway','osm-power','osm-natural-lines',
-  'osm-buildings','osm-peaks-tri','osm-peaks-label','osm-places',
-];
-const OSM_AREA_LAYERS = [
-  'osm-landuse','osm-water',
-];
-
 function applyOsmVisibility(layers, visible) {
   const vis = visible ? 'visible' : 'none';
   // The peak layers (osm-peaks-tri/label) are added later, in map.on('load')
@@ -2037,14 +2189,31 @@ function applyOsmVisibility(layers, visible) {
   layers.forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis); });
 }
 
-toggleOsmLines.addEventListener('change', e => {
-  applyOsmVisibility(OSM_LINE_LAYERS, e.target.checked);
-  saveSetting('osmLines', e.target.checked);
+const osmLayersBtn   = document.getElementById('osm-layers-btn');
+const osmLayersPanel = document.getElementById('osm-layers-panel');
+
+osmLayersPanel.innerHTML = OSM_CATEGORIES.map(cat => `
+  <label class="osm-layer-item">
+    <input type="checkbox" data-osm-cat="${cat.key}" ${loadSetting('osmCat_' + cat.key) ? 'checked' : ''}>
+    ${escapeHtml(cat.label)}
+  </label>`).join('');
+
+osmLayersPanel.querySelectorAll('input[data-osm-cat]').forEach(input => {
+  input.addEventListener('change', () => {
+    const cat = OSM_CATEGORIES.find(c => c.key === input.dataset.osmCat);
+    applyOsmVisibility(cat.layers, input.checked);
+    saveSetting('osmCat_' + cat.key, input.checked);
+  });
 });
 
-toggleOsmAreas.addEventListener('change', e => {
-  applyOsmVisibility(OSM_AREA_LAYERS, e.target.checked);
-  saveSetting('osmAreas', e.target.checked);
+osmLayersBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  osmLayersPanel.style.display = osmLayersPanel.style.display === 'none' ? 'block' : 'none';
+});
+document.addEventListener('click', e => {
+  if (osmLayersPanel.style.display !== 'none' && !osmLayersPanel.contains(e.target) && e.target !== osmLayersBtn) {
+    osmLayersPanel.style.display = 'none';
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -2120,7 +2289,7 @@ map.on('load', () => {
 
   // The peak layers just added didn't exist yet at 'style.load', so they
   // missed that visibility pass — apply it once more now that they're here.
-  applyOsmVisibility(OSM_LINE_LAYERS, loadSetting('osmLines'));
+  applyAllOsmCategories();
 
   // Style/layer reloads reset setFilter too — reassert which OSM ways are
   // hidden for in-progress editable segments (tracks.js, loaded after this

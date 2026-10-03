@@ -55,6 +55,44 @@ input[type=range] {
 
 input[type=checkbox] { accent-color: #5ba4cf; width: 15px; height: 15px; cursor: pointer; }
 
+.dropdown-btn {
+  background: #2a2a2a;
+  color: #e8e8e8;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.dropdown-btn:hover { background: #333; }
+
+/* Same look as #search-results — a floating panel anchored under its trigger */
+.dropdown-panel {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 160px;
+  background: rgba(20, 20, 20, 0.95);
+  backdrop-filter: blur(6px);
+  border: 1px solid #444;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.6);
+  padding: 6px 0;
+  z-index: 10;
+}
+
+.osm-layer-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: #ddd;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.osm-layer-item:hover { background: rgba(255,255,255,0.06); }
+
 select {
   background: #2a2a2a;
   color: #e8e8e8;

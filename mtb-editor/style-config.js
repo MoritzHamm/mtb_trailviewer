@@ -75,7 +75,14 @@ const VIEWER_STYLE = {
       fallback: '#333',
       opacity: 0.35,
     },
+    // Real open water (lakes/bays/straits) — solid fill. Wetlands (marsh/swamp,
+    // natural=wetland) are excluded from this layer (see osm-water's filter) and
+    // instead get a dashed pattern layer (osm-wetland-pattern) drawn over their
+    // already-existing landuse.match wetland tint below, rather than a flat fill —
+    // that tint used to be invisible, masked underneath this layer's old flat
+    // water color covering wetlands too.
     water:     { color: '#2a5f7a', opacity: 0.7 },
+    wetlandPattern: { dashColor: '#bfe0e3', dashAlpha: 235, tileSize: 20 },
     buildings: { color: '#555',    opacity: 0.6 },
     roadCasing: { color: '#222', opacity: 0.7 },
     roadFill:   { color: '#fff', opacity: 0.85 },

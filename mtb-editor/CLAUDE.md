@@ -8,10 +8,16 @@ here today is the map viewing/rendering foundation that editor will sit on top o
 
 ## Stack
 
-- **MapLibre GL JS v4.4.0** + **PMTiles v3.2.0** (both CDN-loaded via unpkg, no build
-  step) — `pmtiles://` protocol registered in `index.html`.
-- **pako 2.1.0 + upng-js 2.1.0** (also CDN) — used to decode PNG tile bytes directly,
-  bypassing `<canvas>` entirely (see Gotchas).
+- **MapLibre GL JS v4.4.0** + **PMTiles v4.5.0** (both CDN-loaded via unpkg, no build
+  step) — `pmtiles://` protocol registered in `index.html`. Was pinned to 3.2.0 until it
+  turned out to be missing several request-cancellation fixes landed in 4.x (properly
+  aborting pending directory/tile requests instead of leaving a read half-consumed on
+  cancellation) — surfaced as "incorrect header check" + aborted-operation console
+  errors under heavy pan/zoom, across every PMTiles source in the app.
+- **pako 2.1.0 + upng-js 2.1.0** (also CDN) — used to decode terrain-RGB/slope PNG tile
+  bytes directly, bypassing `<canvas>` entirely (see Gotchas). Overlay tiles (vegheight/
+  wetness) no longer need this — they moved off alpha entirely and decode via plain
+  `createImageBitmap`+canvas.
 - `style-config.js` — single source of truth for colors/gradients/opacities
   (`VIEWER_STYLE` object), kept separate from `index.html`'s map wiring so styling can
   be iterated on independently.
@@ -130,6 +136,34 @@ parser needed for this protocol. **This does not apply to terrain-RGB/slope**, w
 still decodes via UPNG for exact-byte fidelity (elevation is encoded directly into RGB
 bytes at 0.1m precision — any recompression or canvas color-management pass could shift
 a byte and corrupt the decoded elevation); don't touch that path based on this section.
+
+## Map layers dropdown (replaces the old "OSM lines"/"OSM areas" toggles)
+
+`OSM_CATEGORIES` (`index.html`, near `map.on('style.load', ...)`) groups layers into
+Tracks/Waterways/Other lines/Vegetation areas/Water areas/Others, each with its own
+checkbox in `#osm-layers-panel` (persisted per-category via `osmCat_<key>` settings).
+Grouping calls worth knowing: natural linear features (cliffs/ridges, `osm-natural-lines`)
+went in with railways/powerlines as "Other lines" rather than getting their own category;
+buildings/peaks/places are the "Others" catch-all. Revisit either if they end up wanting
+independent toggles.
+
+**Water vs. wetland — a real, useful data duplication, not a bug to "fix".**
+`foundation/extract_osm_polygons.py`'s `WATER_NATURAL` and `NATURAL_LANDCOVER` sets both
+include `"wetland"`, so every `natural=wetland` polygon lands in **both**
+`water.geojson` and `landuse.geojson` (confirmed on real data: 84,323 of the 113,375
+`water.geojson` features are `natural=wetland`, actually outnumbering real
+`natural=water` at 29,010). `style-config.js`'s `osm.landuse.match` already had a
+`wetland` color entry — it was just permanently invisible, masked underneath
+`osm-water`'s old flat fill covering wetlands too. Fixed purely on the frontend (no
+pipeline rebuild needed, the tag data was already there): `osm-water` now filters
+wetlands out (`['!=', ['get','natural'],'wetland']`, real water only), and a new
+`osm-wetland-pattern` layer (filtered to wetlands only) draws a tileable dashed-line
+pattern (`addWetlandPatternImage()`, standard topo-map marsh symbol) with a
+**transparent background**, over top of `osm-landuse`'s wetland tint — reusing color
+data that already existed rather than inventing a new one. Also dropped
+`waterway=flowline` (a directional flow indicator within wetlands/deltas, not a real
+mapped watercourse) from `osm-waterway` via a filter — technically meaningful, but
+reads as visual noise.
 
 ## OSM feature selection / highlighting
 
