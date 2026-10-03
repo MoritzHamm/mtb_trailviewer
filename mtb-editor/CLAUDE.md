@@ -405,6 +405,15 @@ formulas are the standard FIT SDK ones; not verified against a real device file 
 (no sample `.fit` existed in the repo when this was built) — first real import is worth
 double-checking against a known route.
 
+**GPX import** (`parseGpxFile`, also in `tracks.js`) feeds the same chunking flow as
+FIT — `parseTrackFile` dispatches on extension (falling back to sniffing the `.FIT`
+signature). Uses the browser's `DOMParser`; reads `<trkpt>`s (all segments
+concatenated), falling back to `<rtept>`s for route-only files. `<ele>`/`<time>` are
+optional in GPX, so a GPX without timestamps imports fine but bulk-photo EXIF matching
+has nothing to match against. GPX-imported tracks are still stored with
+`source = 'fit_upload'` (treat it as "recorded-file upload") — not worth a
+check-constraint migration since nothing branches on FIT vs GPX after parsing.
+
 **Point editing** is hand-rolled too (draggable `maplibregl.Marker` per vertex,
 dblclick to delete, click the line to insert) rather than a drawing library like
 `mapbox-gl-draw` — same reasoning (no unverified-compatibility dependency). Practical

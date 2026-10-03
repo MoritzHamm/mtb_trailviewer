@@ -137,7 +137,7 @@
 
     <div id="track-owner-controls" style="display:none">
       <div class="project-active-actions">
-        <button id="track-import-btn">Import .fit</button>
+        <button id="track-import-btn">Import .fit / .gpx</button>
         <button id="track-manual-btn">Draw manual track</button>
       </div>
     </div>
@@ -189,10 +189,10 @@
 <div id="fit-import-wrap" style="display:none">
   <div id="fit-import-panel">
     <div class="entry-form-header">
-      <h3>Import .fit</h3>
+      <h3>Import .fit / .gpx</h3>
       <button id="fit-import-close" aria-label="Close" title="Close">✕</button>
     </div>
-    <input id="fit-import-file" type="file" accept=".fit">
+    <input id="fit-import-file" type="file" accept=".fit,.gpx">
     <div id="fit-import-status"></div>
     <div id="fit-import-profile-wrap" style="display:none">
       <canvas id="fit-profile-canvas" width="440" height="120"></canvas>
@@ -228,7 +228,7 @@
       <h3>Bulk upload photos</h3>
       <button id="track-bulk-photos-close" aria-label="Close" title="Close">✕</button>
     </div>
-    <div class="popup-trail-hint">Photos are matched to a point on the track by comparing each photo's EXIF timestamp to the recorded GPS time — only works for tracks imported from a .fit file. Unmatched photos (no EXIF time, or too far from any recorded time) attach to the track as a whole instead.</div>
+    <div class="popup-trail-hint">Photos are matched to a point on the track by comparing each photo's EXIF timestamp to the recorded GPS time — only works for tracks imported from a .fit file (or a .gpx with timestamps). Unmatched photos (no EXIF time, or too far from any recorded time) attach to the track as a whole instead.</div>
     <input id="track-bulk-photos-file" type="file" accept="image/*" multiple>
     <div class="track-editor-row">
       <label for="track-bulk-photos-offset">Camera clock offset from UTC (hours)</label>

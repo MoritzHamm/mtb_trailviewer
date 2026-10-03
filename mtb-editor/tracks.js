@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Projects & Tracks — FIT import/chunking, manual trail drawing, point
+// Projects & Tracks — FIT/GPX import/chunking, manual trail drawing, point
 // simplification, and shareable planning projects. Kept out of index.html's
 // already-~2000-line inline script since it's a largely self-contained feature.
 // Loaded last (see index.html) so `map`/`sb`/`currentSession`/`escapeHtml`/
@@ -39,7 +39,7 @@ let manualDrawActive = false;
 let manualDrawCoords = [];
 let manualDrawMarkers = [];
 
-let fitRecords = null;          // [{ lat, lng, ele, time }] parsed from the uploaded .fit
+let fitRecords = null;          // [{ lat, lng, ele, time }] parsed from the uploaded .fit/.gpx
 let fitChunkStart = 0;
 let fitChunkEnd = 0;
 let fitDraggingHandle = null;   // 'start' | 'end' | null
@@ -166,6 +166,56 @@ function parseFitFile(buf) {
   }
   if (!records.length) throw new Error('no GPS record points found in this FIT file');
   return records;
+}
+
+// ---------------------------------------------------------------------------
+// GPX parser — same output shape as parseFitFile ([{ lat, lng, ele, time }]).
+// GPX is plain XML so the browser's DOMParser does the heavy lifting. Reads
+// track points (<trkpt>, all <trk>/<trkseg> concatenated in document order),
+// falling back to route points (<rtept>) for route-only files (planned routes
+// exported from e.g. Komoot have no recorded track). Matches on localName so
+// it works regardless of GPX 1.0/1.1 namespace or prefixing. <ele>/<time> are
+// optional per the spec — missing ones become null, same as a FIT record
+// without altitude/timestamp.
+// ---------------------------------------------------------------------------
+function parseGpxFile(text) {
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('not valid XML — not a GPX file');
+  if (doc.documentElement.localName !== 'gpx') throw new Error('missing <gpx> root element — not a GPX file');
+
+  const byLocalName = (root, name) => Array.from(root.getElementsByTagNameNS('*', name));
+  const childText = (el, name) => {
+    const c = Array.from(el.children).find(n => n.localName === name);
+    return c ? c.textContent.trim() : null;
+  };
+
+  let pts = byLocalName(doc, 'trkpt');
+  if (!pts.length) pts = byLocalName(doc, 'rtept');
+
+  const records = [];
+  for (const p of pts) {
+    const lat = parseFloat(p.getAttribute('lat'));
+    const lng = parseFloat(p.getAttribute('lon'));
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    const eleText = childText(p, 'ele');
+    const ele = eleText != null && Number.isFinite(parseFloat(eleText)) ? parseFloat(eleText) : null;
+    const timeText = childText(p, 'time');
+    const time = timeText != null && !Number.isNaN(Date.parse(timeText)) ? Date.parse(timeText) : null;
+    records.push({ lat, lng, ele, time });
+  }
+  if (!records.length) throw new Error('no track or route points found in this GPX file');
+  return records;
+}
+
+// Dispatch on extension, falling back to sniffing the FIT signature (bytes 8–11)
+// for files with an unhelpful name.
+async function parseTrackFile(file) {
+  const buf = await file.arrayBuffer();
+  const ext = file.name.toLowerCase().split('.').pop();
+  if (ext === 'gpx') return parseGpxFile(new TextDecoder().decode(buf));
+  if (ext === 'fit') return parseFitFile(buf);
+  const sig = buf.byteLength >= 12 ? String.fromCharCode(...new Uint8Array(buf, 8, 4)) : '';
+  return sig === '.FIT' ? parseFitFile(buf) : parseGpxFile(new TextDecoder().decode(buf));
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,8 +1187,7 @@ async function handleFitFileChosen(file) {
   const statusEl = document.getElementById('fit-import-status');
   statusEl.textContent = 'Parsing…';
   try {
-    const buf = await file.arrayBuffer();
-    fitRecords = parseFitFile(buf);
+    fitRecords = await parseTrackFile(file);
     statusEl.textContent = `Parsed ${fitRecords.length} GPS points.`;
     fitChunkStart = 0;
     fitChunkEnd = fitRecords.length - 1;
@@ -1391,8 +1440,8 @@ function openBulkPhotoUpload() {
   document.getElementById('track-bulk-photos-offset').value = '0';
   document.getElementById('track-bulk-photos-offset-val').textContent = '0';
   document.getElementById('track-bulk-photos-preview').innerHTML = '';
-  document.getElementById('track-bulk-photos-message').textContent = track.raw_points
-    ? '' : 'This track has no recorded GPS times (not a .fit import) — photos will attach to the whole track.';
+  document.getElementById('track-bulk-photos-message').textContent = track.raw_points?.some(p => p.time != null)
+    ? '' : 'This track has no recorded GPS times (manual track, or a .gpx without timestamps) — photos will attach to the whole track.';
   document.getElementById('track-bulk-photos-upload').disabled = true;
   document.getElementById('track-bulk-photos-wrap').style.display = 'flex';
 }
