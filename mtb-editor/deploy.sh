@@ -54,7 +54,7 @@ log() { printf '[%(%H:%M:%S)T] %s\n' -1 "$1"; }
 
 log "Syncing static assets → $DEST"
 rclone sync "$MTB_DIR/fonts/" "$DEST/fonts/" "${RCLONE_COMMON[@]}"
-for f in index.html style.css style-config.js favicon.ico; do
+for f in index.html style.css style-config.js tracks.js favicon.ico; do
   rclone copyto "$MTB_DIR/$f" "$DEST/$f" "${RCLONE_COMMON[@]}"
 done
 
