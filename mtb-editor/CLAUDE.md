@@ -332,196 +332,137 @@ their own neutral colors.
   relation instead — the old entries just stop showing up anywhere. Not handled
   (acceptable for now since the Supabase project gets wiped before any real deployment).
 
-## Projects & Tracks (FIT import, trail planning, shareable projects)
+## Projects: recordings → tracks → review
 
-A separate planning/staging layer, distinct from the OSM-annotation feature above —
-lives in `tracks.js` (kept out of `index.html`'s already-~2000-line inline script) plus
-`supabase/migrations/0005_projects_and_tracks.sql`. Built for a concrete workflow:
-import a `.fit` file of a scouting walk, cut it into chunks, clean each chunk up,
-attach photos/comments, and send a link to a friend to review — without them needing
-an account. **Supersedes** the unfinished `trails.is_draft`/`draft_geometry` flow
-(above) as the intended path for planning new trails; those columns are untouched but
-no longer where new planning work should go. OSM stays authoritative for real trails —
-nothing here writes to OSM automatically.
+A planning/staging layer, separate from the OSM-annotation feature above. It lives in
+`tracks.js`, kept out of `index.html`'s inline script, with the schema in
+`supabase/migrations/0008_recordings_tracks_points.sql`. **0008 replaces 0005–0007's
+track model and wipes their data**: those tables were dropped and recreated (test data
+only). Projects themselves are kept. Run it in the SQL Editor before deploying the
+matching `tracks.js`. OSM stays authoritative for real trails, and nothing here writes
+to OSM automatically. **Supersedes** the unfinished `trails.is_draft`/`draft_geometry`
+flow.
 
-**Schema:** `projects` (a project's own `id` **is** its share-link capability token —
-no separate token column, same "unguessable id is the credential" idea as signed image
-URLs) → `tracks` (`geom` is the current/working geometry; `raw_points` is the
-*immutable* original FIT-imported slice, `[{lat,lng,ele,time}, ...]`, untouched by
-simplify/edit) → `track_history` (comment/image entries, same free-form type/value
-shape as `trail_history`, but `created_by` is nullable and there's an `author_name` for
-anonymous commenters).
+**Model.** A project's own `id` **is** its share-link capability token. A project holds:
+- `recordings`: an uploaded `.fit`/`.gpx`, with the full parsed point list
+  `[{lat,lng,ele,time}]` in `points` jsonb. Raw material only, authenticated-only, and
+  never exposed to share-link visitors.
+- `tracks`: what a project is actually about. `source` is `'recording'` (cut from a
+  recording: `recording_id` + inclusive `recording_start_idx`/`recording_end_idx`),
+  `'manual'` (drawn) or `'osm_way'` (copied from OSM). `geom` is the working geometry.
+  `raw_points` is a frozen copy of the original slice and survives deleting the
+  recording (`recording_id` → null). `vertex_origin` is the move-clamp baseline,
+  index-aligned with `geom`.
+- `project_points` + `project_history`: comments and photos belong to the **project**,
+  not a track. Bulk photos are placed in Recordings mode, before the tracks covering
+  them necessarily exist. A thread is a point (`point_id`), a whole track (`track_id`),
+  or the project in general (neither). Which track a point is "on" is computed
+  client-side (nearest within 30 m) and never stored, so it can't go stale as tracks
+  are edited, split or deleted. Points with no entries aren't drawn.
 
-**Access model:** authenticated users get full table access (same "small trusted
-group, fully open" RLS as `trails`/`trail_history`). Anonymous share-link visitors
-never get table grants — they go through `security definer` RPCs instead
-(`get_public_project`, `get_public_tracks`, `get_public_track_history`,
-`get_public_track_locations`, `get_public_project_locations`,
-`find_or_create_track_location`, `add_track_comment`), the last of which is the
-**only** anonymous write path anywhere in this schema. `tracks.js` always reads
-through these RPCs (works identically logged in or not) and only uses direct table
-calls for authenticated-only mutations (create/rename/delete, geometry edits, marking
-exported, photo upload). Track photos live in a **public** bucket (`track-images`,
-unlike the private `trail-images`) so anon viewers don't need a signed-URL round trip —
-anon photo *upload* isn't supported (scope call, easy to revisit): friends can comment
-with text, not photos, without an account.
+**Access model.** Authenticated users get full table access (the same "small trusted
+group" RLS as `trails`). Anonymous visitors only go through `security definer` RPCs:
+`get_public_project`, `get_public_tracks`, `get_public_project_points`,
+`get_public_project_history`, `find_or_create_project_point` and
+`add_project_comment`. The last one is the **only** anonymous write path in the schema,
+and it checks that the point/track belongs to the given project. Photos live in the
+**public** `track-images` bucket under `{project_id}/…`. Anonymous visitors can comment
+with text but can't upload photos.
 
-**Point comments/photos (`track_locations`, `supabase/migrations/
-0006_track_locations.sql`):** mirrors trails' `locations`/`trail_history.location_id`
-design (a comment/photo can be tied to a specific spot, not just "the trail" as a
-whole) but as a **separate** table from the trail-side `locations` — that one's RLS is
-deliberately authenticated-only, and track comments need anonymous authorship, so
-sharing it would have meant widening what the trail-annotation feature exposes.
-`track_history.location_id` null is the whole-track thread (opened via the track
-editor's "Comments" button); a `track_locations` id is a specific point's thread,
-opened by clicking the track's line on the map, clicking an existing point marker
-(`track-history-points` layer), or a bulk-matched photo (below).
-`find_or_create_track_location` (unlike trails' `find_or_create_location`) is granted
-to `anon` too, since clicking a track to leave a comment is exactly the
-anonymous-visitor flow this feature exists for.
+**Modes** (tabs in the project panel; logged-out visitors only ever get Review):
+- **Recordings**: upload one or more `.fit`/`.gpx` files, select one, then pick a stretch
+  on the elevation profile. The profile sits in the bottom dock (`#recording-dock`), with
+  distance on the x axis rather than point index, so stops don't eat width. Drag the
+  handles, or click the map near the recording to move the nearer handle. "Extract as
+  track" saves the slice. The pick then continues from the end of that stretch, and
+  stretches already extracted are shaded on the profile. "Import photos…" opens the
+  bulk EXIF matcher against this recording.
+- **Tracks**: select a track to start an edit session on it. Drag a point to move it,
+  click the line to add a point, click a point to select it, and shift-click another to
+  select the stretch between. On the selection: **Remove** (delete the points and join
+  the neighbours; at a track end this trims it), **Simplify** (slider + Apply, applied
+  to the selection when it spans an interior point, otherwise to the whole track), and
+  **Split** (cut at the selection's ends: one point gives 2 tracks, a stretch up to 3).
+  Keys: Del removes, Esc deselects, Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, Ctrl+S saves. Edits
+  stay local until **Save**. Split commits immediately, including unsaved edits. Leaving
+  a dirty session (switching track or mode, closing the project, unloading the page)
+  asks first. "Draw new track" (Enter finishes, Esc cancels) and the OSM popup's "Add to
+  project as editable segment" create tracks here too.
+- **Review**: the track list with comment counts, plus "Project comments". Click a track
+  on the map to open (or create, snapping within 15 m) a point thread there, or click an
+  orange marker to open its thread.
 
-**Bulk photo upload matched by EXIF timestamp:** `tracks.js` hand-rolls a minimal JPEG
-EXIF reader (`findExifDateTimeOriginal`) rather than pulling in a library — same
-reasoning as the FIT parser. Walks JPEG segments to the APP1/Exif block, then the
-TIFF/IFD structure, preferring the Exif sub-IFD's `DateTimeOriginal` over IFD0's plain
-`DateTime`. Each photo's timestamp is matched to the nearest `raw_points[].time` on the
-track (only meaningful for `fit_upload` tracks — manual tracks have no recorded times,
-so bulk-uploaded photos there always attach to the whole track); beyond
-`BULK_PHOTO_MAX_DELTA_MS` (2 hours) a photo counts as unmatched rather than guessed.
-**EXIF `DateTimeOriginal` carries no timezone** — the matcher treats the raw clock
-reading as UTC and applies a user-adjustable "camera clock offset from UTC" (hours) to
-correct it; a systematic mismatch across every photo in the preview list is the tell
-that the offset needs adjusting, not that matching is broken. Only reads standard,
-uncompressed TIFF-in-JPEG Exif (no HEIC, no maker notes, no orientation handling).
+**Editor implementation notes:**
+- Vertices are a **circle layer** (`track-edit-vertices`), not one DOM marker each, so a
+  raw unsimplified track with thousands of points stays usable. Dragging uses
+  `mousedown` on that layer plus `e.preventDefault()` to suppress drag-pan, and the
+  `mouseup` listener is on `window` so a release outside the canvas still ends the drag.
+- Undo/redo stores **whole-array snapshots** (`edit.coords`/`edit.origin`, replaced and
+  never mutated per coordinate, so snapshots are shallow copies) rather than per-op
+  inverses. That way range operations need no undo logic of their own. It's
+  session-scoped and in-memory; there's no persisted edit history.
+- **Move-clamp** (`VERTEX_MOVE_CLAMP_M = 300`): a drag is projected back onto a 300 m
+  radius around the vertex's `vertex_origin` entry. **Snap** (`SNAP_RADIUS_M = 12`)
+  pulls the point to any vertex of the active track or another track in the project
+  before the clamp runs.
+- **Split** gives each piece its own `raw_points` slice and recording index range,
+  found by matching the piece's first/last vertex to the nearest raw point, searched in
+  order. If that doesn't come out ordered (e.g. an out-and-back), it falls back to the
+  parent's whole range. All pieces' ranges are computed before the parent row is
+  mutated.
+- Click routing: `tracks.js` has one `map.on('click')` dispatcher (`onMapClick`) and
+  exposes `window.tracksWantsMapClick`. `index.html`'s OSM-feature click handler calls
+  that first, so no OSM popup opens underneath a click meant for the editor or a project
+  track/point. This fixes the old "stray popup while drawing" known gap. To copy an OSM
+  way while in Tracks mode, close the track editor first (an active edit session claims
+  all clicks).
 
-**FIT parsing is hand-rolled** (`tracks.js`, no CDN library) — deliberately, to avoid
-gambling on an unverified browser/UMD build of a third-party parser. Handles standard
-(non-compressed) record headers and the base types used by position/altitude/timestamp
-fields; developer-data fields are skipped (bytes still consumed correctly, so the
-stream doesn't desync) but not decoded. **Does not** handle compressed-timestamp FIT
-headers (rare in consumer GPS exports) — such a file fails with a clear error rather
-than silently producing wrong points. Semicircle→degree and altitude scale/offset
-formulas are the standard FIT SDK ones; not verified against a real device file yet
-(no sample `.fit` existed in the repo when this was built) — first real import is worth
-double-checking against a known route.
+**Hand-rolled parsers, no CDN libraries** (deliberately, to avoid gambling on an
+unverified browser/UMD build):
+- **FIT** handles standard record headers and the position/altitude/timestamp base
+  types. Developer fields are skipped without desyncing the stream. **Compressed-
+  timestamp headers fail** with a clear error. It hasn't been verified against a real
+  device file yet, so check the first real import against a known route.
+- **GPX** (`parseGpxFile`, via `DOMParser`) reads `<trkpt>`s, with all segments
+  concatenated, and falls back to `<rtept>`s for route-only files. `<ele>`/`<time>` are
+  optional, so a GPX without times imports fine but disables photo matching for that
+  recording. `parseTrackFile` dispatches on file extension and falls back to sniffing
+  the `.FIT` signature.
+- **EXIF** (`findExifDateTimeOriginal`) prefers the Exif sub-IFD's `DateTimeOriginal`
+  over IFD0's `DateTime`. It only reads standard TIFF-in-JPEG (no HEIC). **There's no
+  timezone in EXIF**: the matcher treats the clock reading as UTC plus a user-set "camera
+  clock offset" (hours). A systematic mismatch across all photos means the offset is
+  wrong, not that matching is broken. More than 2 h from any recorded point
+  (`BULK_PHOTO_MAX_DELTA_MS`) counts as unmatched, and the photo goes to the project's
+  general thread.
+- **Simplification** is Ramer–Douglas–Peucker on point *indices*, so surviving points
+  are exact originals. Tolerance is in metres via a flat equirectangular approximation,
+  which is fine at single-trail scale.
 
-**GPX import** (`parseGpxFile`, also in `tracks.js`) feeds the same chunking flow as
-FIT — `parseTrackFile` dispatches on extension (falling back to sniffing the `.FIT`
-signature). Uses the browser's `DOMParser`; reads `<trkpt>`s (all segments
-concatenated), falling back to `<rtept>`s for route-only files. `<ele>`/`<time>` are
-optional in GPX, so a GPX without timestamps imports fine but bulk-photo EXIF matching
-has nothing to match against. GPX-imported tracks are still stored with
-`source = 'fit_upload'` (treat it as "recorded-file upload") — not worth a
-check-constraint migration since nothing branches on FIT vs GPX after parsing.
+**OSM copies.** `source_osm_way_ids` (every fragment's way-level `osm_id`, never the
+relation id) drives a `map.setFilter` that hides those ways from `OSM_TRAIL_LINE_LAYERS`
+while the copy exists (`refreshHiddenOsmIds`/`applyHiddenOsmIdsFilter`, reasserted after
+style reloads). Known gap: the trail-status overlay/glow layers key off `identity_key`,
+not `osm_id`, so they don't hide.
 
-**Point editing** is hand-rolled too (draggable `maplibregl.Marker` per vertex,
-dblclick to delete, click the line to insert) rather than a drawing library like
-`mapbox-gl-draw` — same reasoning (no unverified-compatibility dependency). Practical
-for tens of points (i.e. after simplifying); not meant for editing a raw multi-hundred-
-point FIT chunk directly.
-
-**Point reduction** is a hand-rolled Ramer–Douglas–Peucker implementation operating on
-point *indices* (not reconstructed coordinates), so simplified points are always exact
-originals. Tolerance is in metres, via a flat equirectangular approximation (same trick
-as the slope-shader math above) — fine at single-trail scale, not geodesically exact.
-
-**Export** is GPX-only (client-side XML generation) plus a suggested-OSM-tags text
-blob — no OSM API write-back, matching the "generate exportable data, upload manually
-via JOSM/iD" scope decision.
+**Export** is client-side only: GPX (with elevation taken from the nearest
+`raw_points`), and OSM XML (fresh negative-id nodes + one way with suggested tags; it
+never attempts `action="modify"` against the live way, and names the original id for
+manual merging in JOSM). Both export the *working* geometry, including unsaved edits.
 
 **Known gaps / not built yet:**
-- Manual-draw and edit-points map clicks are registered independently of the existing
-  OSM-feature click handler in `index.html` — while either mode is active, a stray
-  feature popup can still open underneath. Not suppressed (would require exposing
-  `index.html`'s `featurePopup` as a global); low-impact, just a minor rough edge.
-- No per-project ownership/RLS — any authenticated user can edit any project, same
-  "small trusted group" model as trails.
-- No UI for browsing *all* public projects — you need the exact link.
-- Anonymous comment posting has no rate-limiting/abuse protection beyond the 2000-char
-  cap in `add_track_comment`.
-- No UI to rename/merge/delete a `track_location` once created (e.g. two nearby clicks
-  that should've snapped together but landed just past the 15m radius) — they
-  accumulate silently; cascade-deletes with their track, nothing else. Deleting every
-  comment/photo at a location does **not** delete the now-empty location row itself
-  (same as trails' `locations` — a marker can outlive its history), so an emptied
-  point marker stays on the map with an empty thread.
-- Comment/photo deletion is authenticated-only (moderation by the trusted maintainer
-  group, mirroring trails) — an anonymous visitor can't delete even their own comment,
-  since there's no account to prove ownership with.
-- Bulk photo EXIF matching has no manual override in the preview list beyond the
-  offset-hours field — an individual photo that matched to the wrong point can't be
-  reassigned or excluded before upload without changing the offset for the whole batch.
-
-## Trail segment editor (vertex-level editing, OSM import/export)
-
-Foundation for eventually publishing edited/new trails to OSM (manually-reviewed `.osm`
-export first, direct API upload possibly later) — see "Future work" below for the two
-pieces meant to build on top of this: a relation builder and FIT-track gap detection.
-Extends `tracks` (0005) rather than forking a new table — see
-`supabase/migrations/0007_track_segments.sql` for the added columns
-(`source_osm_type`/`source_osm_id`/`source_osm_way_ids`, `vertex_origin`,
-`track_group_id`/`segment_order`) and the regenerated `get_public_tracks`.
-
-**A trail segment IS a track** with `source` now also allowing `'osm_way'` — added via
-the OSM popup's "Add to project as editable segment" button (`index.html`, next to the
-existing trail-history buttons), which collects every clipped vector-tile fragment
-sharing the clicked way/relation identity (same fragment-collection query the gold
-selection-glow already uses) and greedily stitches them into one ordered line
-(`stitchFragments`, `index.html`) before handing the coordinates to
-`tracks.js`'s `window.addTrackFromOsmWay`. Disconnected leftover fragments (outside the
-current viewport) are reported, not force-merged — pan closer and re-add if needed.
-
-**Hiding the OSM original once copied**: `source_osm_way_ids` (every fragment's own
-way-level `osm_id` — never the relation id, which line features don't carry) drives a
-`map.setFilter` excluding those ids from `OSM_TRAIL_LINE_LAYERS`
-(`osm-road-casing`/`osm-road-fill`/`osm-track`/`osm-path`) via
-`refreshHiddenOsmIds`/`applyHiddenOsmIdsFilter` (`tracks.js`), reasserted after project
-open/close, any osm-sourced insert/delete/split, and after style reloads (alongside the
-existing `applyOsmVisibility` re-assertion in `map.on('load')`). Known gap: the
-trail-status overlay/glow layers key off `identity_key`, not `osm_id` — they don't
-automatically hide for a now-edited trail.
-
-**Vertex editing** extends the existing point editor (draggable markers, dblclick to
-delete, click-the-line to insert):
-- **Move-clamp**: `vertex_origin` (index-aligned with `geom`, set at creation and
-  preserved/subset through edits — simplify keeps it in sync via
-  `simplifyLngLatWithOrigin`) is the baseline a drag is clamped against
-  (`VERTEX_MOVE_CLAMP_M = 300`, projects onto the clamp boundary rather than rejecting
-  the move outright). There's no real use case for moving a vertex further than that in
-  one drag.
-- **Snap**: dragging a vertex within `SNAP_RADIUS_M` (12m) of another vertex — the
-  active track's own other vertices, or any other track's, within the *same open
-  project* — snaps to it before the clamp check runs. Cross-project snapping and
-  snapping to live OSM way points are deferred (OSM polyline points aren't reliable
-  trail junctions; worth designing once there's real usage data).
-- **Split** ("before"/"after" a vertex — both are `splitAt(N)` under the hood, just
-  different N): a `maplibregl.Popup` on a single click of a vertex (not the drag).
-  Commits immediately as two DB writes (truncate + insert), **not** part of the undo
-  stack — same immediacy class as "Apply"/"Delete track". Both halves keep the same
-  `source`/`source_osm_*`/`track_group_id`/`raw_points`; the new tail gets
-  `segment_order` = max of its group's existing orders + 1 (not true fractional
-  mid-insertion — a simplification worth revisiting if segments get re-split often
-  enough for ordering to actually matter).
-- **Undo/redo** (`editUndoStack`/`editRedoStack`, `Ctrl+Z`/`Ctrl+Shift+Z` or the
-  Undo/Redo buttons): covers move/delete/insert only, in-memory, scoped to the current
-  editing session — cleared on save or close, same as the existing "Reset to raw"
-  precedent for simplify. No persisted edit-history table; nothing else in this schema
-  does server-side geometry history either.
-
-**OSM export** (`trackToOSMXML`/`exportTrailSegmentOSM`, next to `track-export-gpx-btn`):
-same "generate exportable data, upload manually via JOSM" scope decision as GPX export —
-fresh negative-id nodes + one negative-id way, suggested tags. Deliberately never
-attempts `action="modify"`/version reconciliation against a real OSM way (this schema
-doesn't track a live OSM version number, which JOSM needs to merge correctly); when
-`source_osm_type/id` is set, the post-download alert just names the original id for
-manual cross-referencing.
-
-**Not yet browser-tested** — implemented and internally consistency-checked (brace/paren
-balance, cross-reference greps, re-verified file:line citations against the actual
-files), but this session had no browser tool available to exercise it end-to-end. Test
-each piece per the plan's verification section before relying on it:
-drag-clamp, undo/redo, split (check both rows in Supabase), OSM import (way disappears
-from the base layer, reappears as an editable segment), OSM/GPX export.
+- **Not browser-tested end to end.** The editing logic (select, remove, trim, range
+  simplify, undo/redo, save, split incl. raw-slice ranges, extract, profile index
+  mapping) passed a Node harness with a stubbed map, DOM and Supabase. The actual mouse
+  interaction, rendering and RPCs against the live database haven't been exercised yet.
+- No per-project ownership/RLS: any authenticated user can edit any project.
+- No UI for browsing all projects; you need the link.
+- Anonymous comments have no rate limiting beyond the 2000-character cap.
+- No UI to move, merge or delete a `project_point`. Points with no entries are hidden
+  but not deleted.
+- Bulk photo matching has no per-photo override; only the batch-wide offset.
+- Share links don't capture the "Map layers" dropdown state (the old lines/areas
+  checkboxes it replaced are skipped).
 
 ## Future work (not built yet)
 
@@ -530,7 +471,7 @@ from the base layer, reappears as an editable segment), OSM/GPX export.
   manual-upload stopgap for this
 - **Relation builder** — group existing ways into a named `route=mtb` relation
   (builds on the trail segment editor above)
-- **FIT-track gap detection** — flag GPS stretches that don't match any nearby OSM way
+- **Recording gap detection** — flag GPS stretches that don't match any nearby OSM way
   as new-trail candidates (distance-threshold approach, not full map-matching — human
   reviews every candidate before it becomes a segment)
 - Route planning UI (admin assembles a route) + GPX/FIT export + a route-description

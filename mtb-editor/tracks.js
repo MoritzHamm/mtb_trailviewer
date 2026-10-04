@@ -1,57 +1,58 @@
 // ---------------------------------------------------------------------------
-// Projects & Tracks — FIT/GPX import/chunking, manual trail drawing, point
-// simplification, and shareable planning projects. Kept out of index.html's
-// already-~2000-line inline script since it's a largely self-contained feature.
-// Loaded last (see index.html) so `map`/`sb`/`currentSession`/`escapeHtml`/
-// `VIEWER_STYLE` already exist as globals — no module system, matches this
-// project's no-build-step convention everywhere else.
+// Projects — recordings, tracks, and project-level comments/photos. Kept out
+// of index.html's already-~2400-line inline script since it's a largely
+// self-contained feature. Loaded last (see index.html) so `map`/`sb`/
+// `currentSession`/`escapeHtml`/`VIEWER_STYLE` already exist as globals — no
+// module system, matches this project's no-build-step convention.
 //
-// See supabase/migrations/0005_projects_and_tracks.sql for the schema and
-// mtb-editor/CLAUDE.md for the design writeup.
+// A project has three modes (see mtb-editor/CLAUDE.md for the full writeup):
+//   recordings — upload .fit/.gpx, bulk-import photos matched by timestamp,
+//                extract tracks by picking a start/end on the elevation profile
+//   tracks     — edit a track's geometry: move/insert/remove points, range
+//                selection (remove / simplify / split), undo/redo, save
+//   review     — read-mostly map of tracks + point comments/photos; the only
+//                mode share-link visitors (no account) ever see
 //
-// Reading: authenticated users query `projects`/`tracks`/`track_history`
-// directly (RLS: any authenticated user, full access — same "small trusted
-// group" model as trails/trail_history). Everyone else (including a logged-in
-// user just *viewing* a shared project) reads through the get_public_*
-// security-definer RPCs instead, which work identically whether or not a
-// session exists — so this file always uses those for display, and only
-// switches to direct table calls for the authenticated-only mutations
-// (create/rename/delete project or track, edit geometry, mark exported,
-// upload a photo). Anonymous comments go through the add_track_comment RPC,
-// the one write path that doesn't require a session at all.
+// Schema: supabase/migrations/0008_recordings_tracks_points.sql. Display reads
+// go through the get_public_* security-definer RPCs (identical logged in or
+// not); authenticated-only mutations use direct table calls. Recordings are
+// authenticated-only and never exposed to share-link visitors.
 // ---------------------------------------------------------------------------
 
-let currentProject = null;      // { id, name, description, created_at } | null
-let currentTracks = [];         // [{ id, name, source, geojson, coords, raw_points, simplify_tolerance_m, is_exported, created_at }]
+let currentProject = null;       // { id, name, description, created_at } | null
+let currentMode = 'review';      // 'recordings' | 'tracks' | 'review'
+
+let currentRecordings = [];      // [{ id, name, file_name, format, point_count, started_at, ended_at, created_at, points?, cum? }]
+let recordingsLoadedFor = null;  // project id the recordings list was loaded for (they're auth-only)
+let activeRecordingId = null;
+let recPickStart = 0;            // inclusive index range into the active recording's points
+let recPickEnd = 0;
+let recDraggingHandle = null;    // 'start' | 'end' | null
+let recHoverIdx = null;          // profile hover position, mirrored as a dot on the map
+
+let currentTracks = [];          // [{ id, name, source, coords, raw_points, vertex_origin, recording_id, ... }]
 let activeTrackId = null;
 
-let editingPoints = false;
-let editVertexMarkers = [];
-let editWorkingCoords = [];
-let editVertexOrigin = [];      // [lng,lat] per vertex, the move-clamp baseline (see VERTEX_MOVE_CLAMP_M)
-let editUndoStack = [];         // {type:'move'|'delete'|'insert', ...} — session-scoped, cleared on save/close
-let editRedoStack = [];
+let currentPoints = [];          // [{ id, geojson, label }] — project-level comment/photo locations
+let projectHistory = [];         // every project_history row for the open project
 
-let hiddenOsmWayIds = new Set(); // way-level osm_id's currently hidden from the base OSM layers
+let hiddenOsmWayIds = new Set(); // way-level osm_id's hidden from the base OSM layers
                                   // (every osm_way-sourced track's source_osm_way_ids, unioned)
+
+// Tracks-mode edit session for the active track — null when not editing.
+// coords/origin are replaced (never mutated per-coordinate) so undo snapshots
+// can be cheap shallow copies.
+let edit = null;  // { trackId, coords, origin, selStart, selEnd, selAnchor, undo: [], redo: [] }
+let vertexDrag = null;
 
 let manualDrawActive = false;
 let manualDrawCoords = [];
-let manualDrawMarkers = [];
 
-let fitRecords = null;          // [{ lat, lng, ele, time }] parsed from the uploaded .fit/.gpx
-let fitChunkStart = 0;
-let fitChunkEnd = 0;
-let fitDraggingHandle = null;   // 'start' | 'end' | null
+let thread = null;               // open comment thread: { pointId, trackId } (both null = whole project)
+const historyImagePaths = new Map();   // entryId -> storage path, for cleanup on delete
 
-let commentsTrackId = null;
-let commentsLocationId = null;   // null = whole-track thread; a track_locations id = a specific point
-const trackHistoryImagePaths = new Map();   // entryId -> storage path, for cleaning up the file on delete (repopulated each refreshTrackComments)
-
-let currentLocations = [];       // [{ id, track_id, geojson, label }] — every point comment/photo marker in the open project
-
-let bulkPhotoTrackId = null;
-let bulkPhotoMatches = [];       // [{ file, matchedTime, point, distanceMs }] after "Match photos"
+let bulkPhotoMatches = [];       // [{ file, exifTime, point, deltaMs }] after "Match photos"
+let bulkPhotoObjectUrls = [];
 
 // ---------------------------------------------------------------------------
 // Minimal FIT binary parser
@@ -220,7 +221,7 @@ async function parseTrackFile(file) {
 
 // ---------------------------------------------------------------------------
 // Minimal JPEG EXIF DateTimeOriginal reader — for matching bulk-uploaded photos
-// to a point on a FIT-imported track by timestamp. Hand-rolled for the same
+// to a point on a recording by timestamp. Hand-rolled for the same
 // reason as the FIT parser above: no CDN library whose browser compatibility
 // needs verifying. Walks JPEG segments to find APP1 (Exif), then the TIFF/IFD
 // structure inside it, preferring the Exif sub-IFD's DateTimeOriginal (0x9003)
@@ -333,7 +334,7 @@ function distMeters(a, b) {
 }
 
 // A vertex may not move more than this far from its origin (see vertex_origin,
-// 0007_track_segments.sql) — there's no real use case for dragging a vertex
+// 0008_recordings_tracks_points.sql) — there's no real use case for dragging a vertex
 // further than that, and it guards against a mis-drag silently relocating a
 // point across the map. Projects onto the clamp boundary rather than rejecting
 // the move outright, so a big drag still moves the vertex as far as it's
@@ -359,7 +360,7 @@ function findSnapCandidate(coord, excludeTrackId, excludeIndex) {
     const d = distMeters(coord, pt);
     if (d < bestDist) { bestDist = d; best = pt; }
   };
-  editWorkingCoords.forEach((pt, i) => { if (i !== excludeIndex) consider(pt); });
+  (edit ? edit.coords : []).forEach((pt, i) => { if (i !== excludeIndex) consider(pt); });
   currentTracks.forEach(t => {
     if (t.id === excludeTrackId) return;
     (t.coords || []).forEach(consider);
@@ -442,156 +443,189 @@ function toEWKT(coords) {
   return 'LINESTRING(' + coords.map(c => `${c[0]} ${c[1]}`).join(',') + ')';
 }
 
+// Metres from a point to a polyline (flat local projection, same approximation
+// as the rest of this file) — used to name which track a comment point is on.
+function distToLineMeters(pt, coords) {
+  if (!coords || !coords.length) return Infinity;
+  const mpd = metersPerDegreeAt(pt[1]);
+  const toM = c => [c[0] * mpd.mLng, c[1] * mpd.mLat];
+  const p = toM(pt);
+  if (coords.length === 1) return Math.hypot(p[0] - toM(coords[0])[0], p[1] - toM(coords[0])[1]);
+  let best = Infinity;
+  for (let i = 0; i < coords.length - 1; i++) {
+    best = Math.min(best, pointToSegmentDistSq(p, toM(coords[i]), toM(coords[i + 1])));
+  }
+  return Math.sqrt(best);
+}
+
 // ---------------------------------------------------------------------------
 // Map sources/layers
 // ---------------------------------------------------------------------------
 function emptyFC() { return { type: 'FeatureCollection', features: [] }; }
 function lineFeature(coords, props) { return { type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: props || {} }; }
+function fc(features) { return { type: 'FeatureCollection', features }; }
+function setSourceData(id, data) { const s = map.getSource(id); if (s) s.setData(data); }
+
+function hitBox(point, px) {
+  return [[point.x - px, point.y - px], [point.x + px, point.y + px]];
+}
+function hitLayers(point, layers, px = 6) {
+  const present = layers.filter(id => map.getLayer(id));
+  return present.length ? map.queryRenderedFeatures(hitBox(point, px), { layers: present }) : [];
+}
 
 function registerMapLayers() {
+  const T = VIEWER_STYLE.tracks;
+  const lineLayout = { 'line-join': 'round', 'line-cap': 'round' };
+
   map.addSource('project-tracks', { type: 'geojson', data: emptyFC() });
   map.addLayer({
-    id: 'project-tracks-line', type: 'line', source: 'project-tracks',
-    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    id: 'project-tracks-line', type: 'line', source: 'project-tracks', layout: lineLayout,
     paint: {
-      // Manual sketches get their own color; imported chunks are 'proposed'
-      // (purple) until marked exported (green) — see VIEWER_STYLE.tracks.
-      'line-color': ['match', ['get', 'source'],
-        'manual', VIEWER_STYLE.tracks.manual.color,
-        ['case', ['==', ['get', 'is_exported'], true], VIEWER_STYLE.tracks.exported.color, VIEWER_STYLE.tracks.proposed.color],
-      ],
-      'line-width': 3, 'line-opacity': 0.9, 'line-dasharray': [2, 1],
+      // Exported tracks are green; otherwise manual sketches get their own color
+      // and everything else (recording/osm_way) is 'proposed' — see VIEWER_STYLE.tracks.
+      'line-color': ['case', ['get', 'is_exported'], T.exported.color,
+        ['match', ['get', 'source'], 'manual', T.manual.color, T.proposed.color]],
+      'line-width': ['case', ['get', 'active'], 5, 3],
+      'line-opacity': ['case', ['get', 'dim'], 0.45, 0.9],
+      'line-dasharray': [2, 1],
     },
   });
 
-  map.addSource('fit-import-full', { type: 'geojson', data: emptyFC() });
+  // Recordings mode: the whole active recording (faint) + the picked stretch.
+  map.addSource('recording-full', { type: 'geojson', data: emptyFC() });
   map.addLayer({
-    id: 'fit-import-full-line', type: 'line', source: 'fit-import-full',
-    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    id: 'recording-full-line', type: 'line', source: 'recording-full', layout: lineLayout,
     paint: {
-      'line-color': VIEWER_STYLE.tracks.rawImport.color, 'line-width': VIEWER_STYLE.tracks.rawImport.width,
-      'line-opacity': VIEWER_STYLE.tracks.rawImport.opacity, 'line-dasharray': VIEWER_STYLE.tracks.rawImport.dasharray,
+      'line-color': T.rawImport.color, 'line-width': T.rawImport.width,
+      'line-opacity': T.rawImport.opacity, 'line-dasharray': T.rawImport.dasharray,
     },
   });
-
-  map.addSource('fit-import-chunk', { type: 'geojson', data: emptyFC() });
+  map.addSource('recording-pick', { type: 'geojson', data: emptyFC() });
   map.addLayer({
-    id: 'fit-import-chunk-line', type: 'line', source: 'fit-import-chunk',
-    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    id: 'recording-pick-line', type: 'line', source: 'recording-pick', layout: lineLayout,
+    paint: { 'line-color': T.chunkPick.color, 'line-width': T.chunkPick.width, 'line-opacity': T.chunkPick.opacity },
+  });
+
+  // Comment/photo points (only those that actually have entries).
+  map.addSource('project-points', { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: 'project-points-layer', type: 'circle', source: 'project-points',
     paint: {
-      'line-color': VIEWER_STYLE.tracks.chunkPick.color, 'line-width': VIEWER_STYLE.tracks.chunkPick.width,
-      'line-opacity': VIEWER_STYLE.tracks.chunkPick.opacity,
+      'circle-radius': T.locationPoint.radius,
+      'circle-color': T.locationPoint.color,
+      'circle-stroke-color': T.locationPoint.strokeColor,
+      'circle-stroke-width': T.locationPoint.strokeWidth,
     },
   });
 
-  // Shared live-preview line for both "edit points" mode and manual drawing —
-  // the two are mutually exclusive (only one active at a time), so one source
-  // covers both.
+  // Tracks mode: the working line, the selected stretch, and every vertex. Vertices
+  // are a circle layer (not one DOM marker each) so a raw, unsimplified track with
+  // thousands of points stays responsive.
   map.addSource('track-edit-line', { type: 'geojson', data: emptyFC() });
   map.addLayer({
-    id: 'track-edit-line-layer', type: 'line', source: 'track-edit-line',
-    layout: { 'line-join': 'round', 'line-cap': 'round' },
-    paint: { 'line-color': VIEWER_STYLE.tracks.chunkPick.color, 'line-width': 3, 'line-opacity': 0.9, 'line-dasharray': [1, 1] },
+    id: 'track-edit-line-layer', type: 'line', source: 'track-edit-line', layout: lineLayout,
+    paint: { 'line-color': T.editLine.color, 'line-width': T.editLine.width, 'line-opacity': T.editLine.opacity },
   });
-
-  // Click the preview line while editing to insert a vertex at that point —
-  // only active during editingPoints (manual-draw adds points via the
-  // generic map click handler registered in startManualDraw's caller below,
-  // since there's no line to click until at least 2 points exist).
-  map.on('click', 'track-edit-line-layer', e => {
-    if (!editingPoints) return;
-    const clickLngLat = [e.lngLat.lng, e.lngLat.lat];
-    const insertAt = nearestSegmentIndex(editWorkingCoords, clickLngLat) + 1;
-    editWorkingCoords.splice(insertAt, 0, clickLngLat);
-    editVertexOrigin.splice(insertAt, 0, clickLngLat.slice()); // a new vertex's own creation point is its origin
-    pushUndo({ type: 'insert', index: insertAt, coord: clickLngLat, origin: clickLngLat.slice() });
-    rebuildEditMarkers(true);
-  });
-
-  // Manual-draw points — registered once, checks state internally (same
-  // pattern as index.html's other always-on handlers, e.g. history-points).
-  map.on('click', e => {
-    if (manualDrawActive) addManualDrawPoint(e.lngLat);
-  });
-
-  // Point comments/photos (track_locations) — small markers, same idea as
-  // index.html's own 'history-points' layer for trails.
-  map.addSource('track-history-points', { type: 'geojson', data: emptyFC() });
+  map.addSource('track-edit-selection', { type: 'geojson', data: emptyFC() });
   map.addLayer({
-    id: 'track-history-points-layer', type: 'circle', source: 'track-history-points',
+    id: 'track-edit-selection-layer', type: 'line', source: 'track-edit-selection', layout: lineLayout,
+    paint: { 'line-color': T.vertexSelected.color, 'line-width': T.editLine.width + 3, 'line-opacity': 0.85 },
+  });
+  map.addSource('track-edit-vertices', { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: 'track-edit-vertices-layer', type: 'circle', source: 'track-edit-vertices',
     paint: {
-      'circle-radius': VIEWER_STYLE.tracks.locationPoint.radius,
-      'circle-color': VIEWER_STYLE.tracks.locationPoint.color,
-      'circle-stroke-color': VIEWER_STYLE.tracks.locationPoint.strokeColor,
-      'circle-stroke-width': VIEWER_STYLE.tracks.locationPoint.strokeWidth,
+      'circle-radius': ['case', ['get', 'sel'], T.vertexSelected.radius, T.vertex.radius],
+      'circle-color': ['case', ['get', 'sel'], T.vertexSelected.color, T.vertex.color],
+      'circle-stroke-color': T.vertex.strokeColor,
+      'circle-stroke-width': T.vertex.strokeWidth,
     },
   });
-  map.on('click', 'track-history-points-layer', e => {
-    const f = e.features[0];
-    const track = currentTracks.find(t => t.id === f.properties.track_id);
-    if (track) openTrackComments(track, f.properties.id);
-  });
-  map.on('mouseenter', 'track-history-points-layer', () => { map.getCanvas().style.cursor = 'pointer'; });
-  map.on('mouseleave', 'track-history-points-layer', () => { map.getCanvas().style.cursor = ''; });
 
-  // Click a track's own line (not an existing point marker) to comment/attach a
-  // photo at that specific spot — skipped while drawing/editing, since a click
-  // there means something else entirely.
-  map.on('click', 'project-tracks-line', e => {
-    if (manualDrawActive || editingPoints) return;
-    const track = currentTracks.find(t => t.id === e.features[0].properties.id);
-    if (track) openTrackCommentsAtPoint(track, e.lngLat.lng, e.lngLat.lat);
+  // Profile-hover position on the active recording.
+  map.addSource('recording-cursor', { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: 'recording-cursor-layer', type: 'circle', source: 'recording-cursor',
+    paint: { 'circle-radius': 6, 'circle-color': T.chunkPick.color, 'circle-stroke-color': '#1a1a1a', 'circle-stroke-width': 2 },
   });
-  map.on('mouseenter', 'project-tracks-line', () => { if (!manualDrawActive && !editingPoints) map.getCanvas().style.cursor = 'pointer'; });
-  map.on('mouseleave', 'project-tracks-line', () => { map.getCanvas().style.cursor = ''; });
+
+  map.on('click', onMapClick);
+  map.on('mousedown', 'track-edit-vertices-layer', onVertexMouseDown);
+  map.on('mousemove', onMapHover);
 }
+
+// Cursor feedback — one handler instead of per-layer enter/leave pairs, since
+// what's clickable depends on the mode.
+function onMapHover(e) {
+  if (!currentProject || vertexDrag) return;
+  const canvas = map.getCanvas();
+  if (manualDrawActive || (currentMode === 'recordings' && activeRecordingId)) { canvas.style.cursor = 'crosshair'; return; }
+  if (currentMode === 'tracks' && edit && hitLayers(e.point, ['track-edit-vertices-layer'], 3).length) { canvas.style.cursor = 'move'; return; }
+  if (currentMode === 'tracks' && edit && hitLayers(e.point, ['track-edit-line-layer']).length) { canvas.style.cursor = 'copy'; return; }
+  if (hitLayers(e.point, ['project-tracks-line', 'project-points-layer']).length) { canvas.style.cursor = 'pointer'; return; }
+  if (canvas.style.cursor === 'crosshair' || canvas.style.cursor === 'move' || canvas.style.cursor === 'copy') canvas.style.cursor = '';
+}
+
+// Single click dispatcher for everything this file handles on the map.
+function onMapClick(e) {
+  if (!currentProject) return;
+  if (manualDrawActive) { addManualDrawPoint(e.lngLat); return; }
+
+  if (currentMode === 'tracks') {
+    if (edit) {
+      // Vertex clicks are handled by the mousedown/mouseup drag logic.
+      if (hitLayers(e.point, ['track-edit-vertices-layer'], 3).length) return;
+      if (hitLayers(e.point, ['track-edit-line-layer']).length) { insertVertexAt([e.lngLat.lng, e.lngLat.lat]); return; }
+    }
+    const t = hitLayers(e.point, ['project-tracks-line'])[0];
+    if (t) { selectTrack(t.properties.id); return; }
+    if (edit) clearSelection();
+    return;
+  }
+
+  if (currentMode === 'recordings') {
+    if (activeRecordingId) moveNearestHandleToClick(e);
+    return;
+  }
+
+  // review
+  const p = hitLayers(e.point, ['project-points-layer'])[0];
+  if (p) { openThread({ pointId: p.properties.id }); return; }
+  if (hitLayers(e.point, ['project-tracks-line']).length) openThreadAtClick(e.lngLat);
+}
+
+// index.html's OSM-feature click handler asks this first, so a click meant for
+// a project track/point/editor doesn't also open an OSM popup underneath.
+window.tracksWantsMapClick = function (e) {
+  if (!currentProject) return false;
+  if (manualDrawActive) return true;
+  if (currentMode === 'tracks' && edit) return true;
+  if (currentMode === 'recordings' && activeRecordingId) return true;
+  return hitLayers(e.point, ['project-tracks-line', 'project-points-layer']).length > 0;
+};
 
 function refreshProjectTracksSource() {
-  const src = map.getSource('project-tracks');
-  if (!src) return;
   const features = currentTracks
-    // Hide whichever track is actively being point-edited — the live preview
-    // on track-edit-line stands in for it instead.
-    .filter(t => !(editingPoints && t.id === activeTrackId))
-    .map(t => lineFeature(t.coords, { id: t.id, source: t.source, is_exported: !!t.is_exported }));
-  src.setData({ type: 'FeatureCollection', features });
+    // The track being edited is drawn by the edit layers instead.
+    .filter(t => !(edit && t.id === edit.trackId))
+    .map(t => lineFeature(t.coords, {
+      id: t.id, source: t.source, is_exported: !!t.is_exported,
+      active: t.id === activeTrackId,
+      // In recordings mode, tracks from other recordings fade into the background.
+      dim: currentMode === 'recordings' && !!activeRecordingId && t.recording_id !== activeRecordingId,
+    }));
+  setSourceData('project-tracks', fc(features));
 }
 
-function refreshProjectLocationsSource() {
-  const src = map.getSource('track-history-points');
-  if (!src) return;
-  const features = currentLocations.map(l => ({
-    type: 'Feature', geometry: l.geojson, properties: { id: l.id, track_id: l.track_id },
-  }));
-  src.setData({ type: 'FeatureCollection', features });
-}
+function entriesForPoint(pointId) { return projectHistory.filter(r => r.point_id === pointId); }
 
-// Adds a just-touched location to the in-memory list without a re-fetch (we
-// already know its id/coords from whatever just created or resolved it) —
-// no-ops if it's already known, since find_or_create_track_location may have
-// resolved to a pre-existing location rather than a new one.
-function ensureLocalLocation(id, trackId, lng, lat) {
-  if (currentLocations.some(l => l.id === id)) return;
-  currentLocations.push({ id, track_id: trackId, geojson: { type: 'Point', coordinates: [lng, lat] }, label: null });
-  refreshProjectLocationsSource();
-}
-
-function setEditLineSource(coords) {
-  const src = map.getSource('track-edit-line');
-  if (src) src.setData(coords && coords.length >= 2 ? { type: 'FeatureCollection', features: [lineFeature(coords)] } : emptyFC());
-}
-function clearEditLineSource() { setEditLineSource(null); }
-
-function setFitImportFullSource() {
-  const src = map.getSource('fit-import-full');
-  if (src) src.setData({ type: 'FeatureCollection', features: [lineFeature(fitRecords.map(r => [r.lng, r.lat]))] });
-}
-function updateFitChunkSource() {
-  const src = map.getSource('fit-import-chunk');
-  if (src) src.setData({ type: 'FeatureCollection', features: [lineFeature(fitRecords.slice(fitChunkStart, fitChunkEnd + 1).map(r => [r.lng, r.lat]))] });
-}
-function clearFitImportSources() {
-  ['fit-import-full', 'fit-import-chunk'].forEach(id => { const s = map.getSource(id); if (s) s.setData(emptyFC()); });
+function refreshPointsSource() {
+  // Hidden while editing geometry — they'd just be clutter between the vertices.
+  const features = currentMode === 'tracks' ? [] : currentPoints
+    .filter(p => entriesForPoint(p.id).length > 0)
+    .map(p => ({ type: 'Feature', geometry: p.geojson, properties: { id: p.id } }));
+  setSourceData('project-points', fc(features));
 }
 
 function fitMapToCoords(coords) {
@@ -611,6 +645,9 @@ function fitMapToTracks() {
 // ---------------------------------------------------------------------------
 // Projects
 // ---------------------------------------------------------------------------
+const TRACK_COLUMNS = 'id,name,source,recording_id,recording_start_idx,recording_end_idx,raw_points,'
+  + 'vertex_origin,is_exported,source_osm_type,source_osm_id,source_osm_way_ids,created_at';
+
 async function loadMyProjects() {
   const sel = document.getElementById('project-select');
   sel.innerHTML = '<option value="">— open a project —</option>';
@@ -625,34 +662,33 @@ async function loadMyProjects() {
 }
 
 // opts.fitView: false skips the auto fit-to-tracks camera move — used when the
-// link already carries an explicit saved view (see applyViewParamsFromURL), so
-// that view isn't immediately overridden by an auto-fit.
-//
-// Wrapped in try/catch end-to-end (not just around the first RPC call) —
-// previously an exception anywhere after the initial fetch (e.g. while mapping
-// track rows) failed completely silently: no alert, no console output, the
-// panel just never left the "open a project" state with no sign anything had
-// gone wrong. If this still fails to open a project, check the browser
-// console — the error is now always logged there at minimum.
+// link already carries an explicit saved view (see applyViewParamsFromURL).
+// Wrapped in try/catch end-to-end so a failure anywhere is at least logged.
 async function openProject(id, opts = {}) {
+  if (!confirmDiscardEdits()) return;
   try {
     const { data: proj, error } = await sb.rpc('get_public_project', { p_id: id }).single();
     if (error || !proj) { console.error(error); alert('Could not load that project — check the link.'); return; }
-    const { data: tracks, error: tErr } = await sb.rpc('get_public_tracks', { p_project_id: id });
+    const [{ data: tracks, error: tErr }, { data: points, error: pErr }] = await Promise.all([
+      sb.rpc('get_public_tracks', { p_project_id: id }),
+      sb.rpc('get_public_project_points', { p_project_id: id }),
+    ]);
     if (tErr) console.error(tErr);
-    const { data: locations, error: lErr } = await sb.rpc('get_public_project_locations', { p_project_id: id });
-    if (lErr) console.error(lErr);
+    if (pErr) console.error(pErr);
 
+    endEditSession();
+    deselectRecording();
     currentProject = proj;
     currentTracks = (tracks || []).map(t => ({ ...t, coords: t.geojson.coordinates }));
-    currentLocations = locations || [];
+    currentPoints = points || [];
+    currentRecordings = [];
+    recordingsLoadedFor = null;
     activeTrackId = null;
-    stopEditingPoints(false);
+    await refreshHistory();
+    if (currentSession) await loadRecordings();
 
     renderProjectActive();
-    renderTrackList();
-    refreshProjectTracksSource();
-    refreshProjectLocationsSource();
+    setMode(currentSession ? (currentTracks.length ? 'tracks' : 'recordings') : 'review', { force: true });
     refreshHiddenOsmIds();
     if (opts.fitView !== false) fitMapToTracks();
 
@@ -666,16 +702,22 @@ async function openProject(id, opts = {}) {
 }
 
 function closeProject() {
+  if (!confirmDiscardEdits()) return;
+  endEditSession();
+  if (manualDrawActive) cancelManualDraw();
+  deselectRecording();
+  closeThread();
   currentProject = null;
   currentTracks = [];
-  currentLocations = [];
+  currentPoints = [];
+  currentRecordings = [];
+  recordingsLoadedFor = null;
+  projectHistory = [];
   activeTrackId = null;
-  stopEditingPoints(false);
-  closeTrackEditor();
   renderProjectActive();
-  renderTrackList();
+  renderTrackLists();
   refreshProjectTracksSource();
-  refreshProjectLocationsSource();
+  refreshPointsSource();
   refreshHiddenOsmIds();
 
   const url = new URL(location.href);
@@ -689,375 +731,944 @@ function renderProjectActive() {
   if (!currentProject) return;
   document.getElementById('project-active-name').textContent = currentProject.name;
   document.getElementById('project-active-desc').textContent = currentProject.description || '';
-  document.getElementById('track-owner-controls').style.display = currentSession ? 'block' : 'none';
+  document.getElementById('project-mode-tabs').style.display = currentSession ? 'flex' : 'none';
 }
 
-function renderTrackList() {
-  const ul = document.getElementById('track-list');
+// ---------------------------------------------------------------------------
+// Modes
+// ---------------------------------------------------------------------------
+function confirmDiscardEdits() {
+  if (!edit || !isEditDirty()) return true;
+  const t = currentTracks.find(x => x.id === edit.trackId);
+  return confirm(`Discard unsaved changes to "${t?.name || 'this track'}"?`);
+}
+
+// Returns false if the switch was cancelled (unsaved edits kept).
+function setMode(mode, { force = false } = {}) {
+  if (!currentSession) mode = 'review';
+  if (mode === currentMode && !force) return true;
+  if (!force && !confirmDiscardEdits()) return false;
+
+  endEditSession();
+  if (manualDrawActive) cancelManualDraw();
+  if (mode !== 'recordings') deselectRecording();
+  currentMode = mode;
+
+  document.querySelectorAll('#project-mode-tabs button').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+  ['recordings', 'tracks', 'review'].forEach(m => {
+    document.getElementById(`mode-${m}`).style.display = m === mode ? 'block' : 'none';
+  });
+
+  if (mode === 'tracks' && activeTrack()) startEditSession(activeTrack());
+  renderRecordingList();
+  renderTrackLists();
+  refreshProjectTracksSource();
+  refreshPointsSource();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Recordings mode
+// ---------------------------------------------------------------------------
+const RECORDING_META_COLUMNS = 'id,name,file_name,format,point_count,started_at,ended_at,created_at';
+
+function activeRecording() { return currentRecordings.find(r => r.id === activeRecordingId); }
+function tracksFromRecording(recId) { return currentTracks.filter(t => t.recording_id === recId); }
+
+async function loadRecordings() {
+  if (!currentProject || !currentSession) return;
+  const projectId = currentProject.id;
+  const { data, error } = await sb.from('recordings').select(RECORDING_META_COLUMNS)
+    .eq('project_id', projectId).order('created_at');
+  if (error) { console.error(error); return; }
+  if (currentProject?.id !== projectId) return;
+  currentRecordings = data;
+  recordingsLoadedFor = projectId;
+  renderRecordingList();
+}
+
+// Cumulative distance along the recording — the profile's x axis is distance,
+// not point index, so standing still for ten minutes doesn't eat a third of
+// the profile's width.
+function prepareRecording(rec) {
+  if (rec.cum) return;
+  const cum = new Float64Array(rec.points.length);
+  for (let i = 1; i < rec.points.length; i++) {
+    const a = rec.points[i - 1], b = rec.points[i];
+    cum[i] = cum[i - 1] + distMeters([a.lng, a.lat], [b.lng, b.lat]);
+  }
+  rec.cum = cum;
+}
+
+function formatKm(m) { return m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`; }
+function formatDuration(ms) {
+  const min = Math.round(ms / 60000);
+  return min >= 60 ? `${Math.floor(min / 60)} h ${min % 60} min` : `${min} min`;
+}
+
+function renderRecordingList() {
+  const ul = document.getElementById('recording-list');
   ul.innerHTML = '';
-  for (const t of currentTracks) {
+  if (!currentRecordings.length) {
+    ul.innerHTML = '<li class="item-list-empty">No recordings yet — upload a .fit or .gpx.</li>';
+    return;
+  }
+  for (const r of currentRecordings) {
     const li = document.createElement('li');
-    li.className = t.id === activeTrackId ? 'active' : '';
-    const badgeStyle = t.source === 'manual' ? VIEWER_STYLE.tracks.manual
-      : t.is_exported ? VIEWER_STYLE.tracks.exported : VIEWER_STYLE.tracks.proposed;
-    li.innerHTML = `<span>${escapeHtml(t.name || '(untitled)')}</span>` +
-      `<span class="track-badge" style="background:${badgeStyle.color}">${t.is_exported ? 'exported' : t.source}</span>`;
-    li.addEventListener('click', () => selectTrack(t.id));
+    li.className = r.id === activeRecordingId ? 'active' : '';
+    const when = r.started_at ? new Date(r.started_at).toLocaleDateString() : r.format.toUpperCase();
+    const n = tracksFromRecording(r.id).length;
+    li.innerHTML = `<span class="item-name">${escapeHtml(r.name)}<small>${escapeHtml(when)} · ${r.point_count} pts</small></span>`
+      + `<span class="track-badge neutral">${n} track${n === 1 ? '' : 's'}</span>`;
+    li.addEventListener('click', () => {
+      if (r.id === activeRecordingId) deselectRecording(); else selectRecording(r.id);
+    });
     ul.appendChild(li);
   }
 }
 
-function activeTrack() { return currentTracks.find(t => t.id === activeTrackId); }
-
-function selectTrack(id) {
-  if (editingPoints) stopEditingPoints(false); // switching tracks discards unsaved point edits
-  activeTrackId = id;
-  renderTrackList();
-  refreshProjectTracksSource();
-  openTrackEditor(activeTrack());
-  const t = activeTrack();
-  if (t) fitMapToCoords(t.coords);
+async function uploadRecordings(files) {
+  if (!currentProject || !currentSession || !files.length) return;
+  const status = document.getElementById('recording-upload-status');
+  let lastId = null;
+  const errors = [];
+  for (const [k, file] of files.entries()) {
+    status.textContent = `Reading ${file.name} (${k + 1}/${files.length})…`;
+    try {
+      const points = await parseTrackFile(file);
+      const times = points.map(p => p.time).filter(t => t != null);
+      const format = /\.gpx$/i.test(file.name) ? 'gpx' : 'fit';
+      const { data, error } = await sb.from('recordings').insert({
+        project_id: currentProject.id,
+        name: file.name.replace(/\.(fit|gpx)$/i, ''),
+        file_name: file.name, format, points, point_count: points.length,
+        started_at: times.length ? new Date(Math.min(...times)).toISOString() : null,
+        ended_at: times.length ? new Date(Math.max(...times)).toISOString() : null,
+      }).select(RECORDING_META_COLUMNS).single();
+      if (error) throw error;
+      currentRecordings.push({ ...data, points });
+      lastId = data.id;
+    } catch (err) {
+      errors.push(`${file.name}: ${err.message}`);
+    }
+  }
+  status.textContent = errors.length ? `Could not import — ${errors.join('; ')}` : '';
+  renderRecordingList();
+  if (lastId) selectRecording(lastId);
 }
 
-function openTrackEditor(track) {
-  const wrap = document.getElementById('track-editor-wrap');
-  wrap.style.display = (currentSession && track) ? 'block' : 'none';
-  if (!currentSession || !track) return;
-  document.getElementById('track-editor-name').value = track.name || '';
-  document.getElementById('track-editor-source-badge').textContent = track.source;
-  document.getElementById('track-simplify-slider').value = track.simplify_tolerance_m || 0;
-  document.getElementById('track-simplify-val').textContent = `${track.simplify_tolerance_m || 0} m`;
-  document.getElementById('track-simplify-reset').disabled = !track.raw_points;
-  document.getElementById('track-mark-exported-btn').textContent = track.is_exported ? 'Unmark exported' : 'Mark exported';
-  document.getElementById('track-edit-points-btn').textContent = 'Edit points';
-  setTrackEditorMessage('');
+async function selectRecording(id) {
+  const rec = currentRecordings.find(r => r.id === id);
+  if (!rec) return;
+  activeRecordingId = id;
+  renderRecordingList();
+  const msg = document.getElementById('recording-message');
+  if (!rec.points) {
+    msg.textContent = 'Loading points…';
+    const { data, error } = await sb.from('recordings').select('points').eq('id', id).single();
+    if (activeRecordingId !== id) return; // user clicked something else meanwhile
+    if (error) { msg.textContent = `Error: ${error.message}`; return; }
+    rec.points = data.points;
+  }
+  msg.textContent = '';
+  prepareRecording(rec);
+
+  // Start the pick where the last extracted track from this recording ended, so
+  // walking through a recording piece by piece needs no handle-dragging at all.
+  const n = rec.points.length;
+  const lastEnd = Math.max(-1, ...tracksFromRecording(id).map(t => t.recording_end_idx ?? -1));
+  recPickStart = lastEnd > 0 && lastEnd < n - 2 ? lastEnd : 0;
+  recPickEnd = n - 1;
+  recHoverIdx = null;
+
+  document.getElementById('recording-detail').style.display = 'block';
+  document.getElementById('recording-name').value = rec.name;
+  const timed = rec.points.some(p => p.time != null);
+  document.getElementById('recording-meta').textContent =
+    `${rec.file_name || rec.format.toUpperCase()} · ${formatKm(rec.cum[n - 1])}`
+    + (rec.started_at && rec.ended_at ? ` · ${formatDuration(new Date(rec.ended_at) - new Date(rec.started_at))}` : '')
+    + (timed ? '' : ' · no timestamps');
+  document.getElementById('recording-bulk-photos-btn').disabled = !timed;
+  document.getElementById('recording-bulk-photos-btn').title = timed ? '' : 'This recording has no timestamps to match photos against';
+  document.getElementById('recording-dock').style.display = 'block';
+
+  setSourceData('recording-full', fc([lineFeature(rec.points.map(p => [p.lng, p.lat]))]));
+  refreshProjectTracksSource();
+  updateRecordingPick();
+  fitMapToCoords(rec.points.map(p => [p.lng, p.lat]));
+}
+
+function deselectRecording() {
+  activeRecordingId = null;
+  recDraggingHandle = null;
+  recHoverIdx = null;
+  document.getElementById('recording-detail').style.display = 'none';
+  document.getElementById('recording-dock').style.display = 'none';
+  ['recording-full', 'recording-pick', 'recording-cursor'].forEach(id => setSourceData(id, emptyFC()));
+  renderRecordingList();
+  refreshProjectTracksSource();
+}
+
+function updateRecordingPick() {
+  const rec = activeRecording();
+  if (!rec?.points) return;
+  setSourceData('recording-pick', fc([lineFeature(rec.points.slice(recPickStart, recPickEnd + 1).map(p => [p.lng, p.lat]))]));
+  drawRecordingProfile();
+
+  const a = rec.points[recPickStart], b = rec.points[recPickEnd];
+  const parts = [formatKm(rec.cum[recPickEnd] - rec.cum[recPickStart]), `${recPickEnd - recPickStart + 1} pts`];
+  if (a.time != null && b.time != null) parts.push(formatDuration(b.time - a.time));
+  document.getElementById('recording-dock-info').textContent = `Selected: ${parts.join(' · ')}`;
+}
+
+const PROFILE_PAD = 8;
+
+function drawRecordingProfile() {
+  const rec = activeRecording();
+  const canvas = document.getElementById('recording-profile-canvas');
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!rec?.points || rec.points.length < 2) return;
+
+  const pts = rec.points, n = pts.length, total = rec.cum[n - 1] || 1, pad = PROFILE_PAD;
+  const xAt = i => pad + (rec.cum[i] / total) * (w - pad * 2);
+  const eles = pts.map(p => p.ele).filter(e => e != null);
+  const minE = eles.length ? Math.min(...eles) : 0;
+  const maxE = eles.length ? Math.max(...eles) : 1;
+  const span = Math.max(1, maxE - minE);
+  const yAt = i => eles.length ? h - pad - ((pts[i].ele ?? minE) - minE) / span * (h - pad * 2) : h / 2;
+
+  // Already-extracted stretches.
+  ctx.fillStyle = hexToRgba(VIEWER_STYLE.tracks.proposed.color, 0.22);
+  for (const t of tracksFromRecording(rec.id)) {
+    if (t.recording_start_idx == null || t.recording_end_idx == null) continue;
+    const s = Math.max(0, t.recording_start_idx), e = Math.min(n - 1, t.recording_end_idx);
+    ctx.fillRect(xAt(s), 0, Math.max(1, xAt(e) - xAt(s)), h);
+  }
+
+  // Current pick.
+  ctx.fillStyle = hexToRgba(VIEWER_STYLE.tracks.chunkPick.color, 0.15);
+  ctx.fillRect(xAt(recPickStart), 0, xAt(recPickEnd) - xAt(recPickStart), h);
+
+  ctx.strokeStyle = '#5ba4cf';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) { if (i === 0) ctx.moveTo(xAt(i), yAt(i)); else ctx.lineTo(xAt(i), yAt(i)); }
+  ctx.stroke();
+
+  ctx.fillStyle = '#888';
+  ctx.font = '10px system-ui, sans-serif';
+  if (eles.length) {
+    ctx.fillText(`${Math.round(maxE)} m`, pad + 2, pad + 8);
+    ctx.fillText(`${Math.round(minE)} m`, pad + 2, h - pad - 2);
+  }
+  ctx.fillText(formatKm(total), w - pad - 40, h - pad - 2);
+
+  ctx.strokeStyle = VIEWER_STYLE.tracks.chunkPick.color;
+  ctx.lineWidth = 2;
+  for (const i of [recPickStart, recPickEnd]) {
+    ctx.beginPath(); ctx.moveTo(xAt(i), 0); ctx.lineTo(xAt(i), h); ctx.stroke();
+  }
+
+  if (recHoverIdx != null) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(xAt(recHoverIdx), 0); ctx.lineTo(xAt(recHoverIdx), h); ctx.stroke();
+  }
+}
+
+function hexToRgba(hex, alpha) {
+  const m = hex.replace('#', '');
+  const v = parseInt(m.length === 3 ? m.split('').map(c => c + c).join('') : m, 16);
+  return `rgba(${(v >> 16) & 255}, ${(v >> 8) & 255}, ${v & 255}, ${alpha})`;
+}
+
+// Profile x (CSS px, relative to the canvas) -> nearest point index, via
+// binary search on cumulative distance.
+function recIndexFromClientX(clientX) {
+  const rec = activeRecording();
+  const canvas = document.getElementById('recording-profile-canvas');
+  const rect = canvas.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (clientX - rect.left - PROFILE_PAD) / (rect.width - PROFILE_PAD * 2)));
+  const n = rec.points.length;
+  const target = frac * rec.cum[n - 1];
+  let lo = 0, hi = n - 1;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (rec.cum[mid] < target) lo = mid + 1; else hi = mid; }
+  if (lo > 0 && target - rec.cum[lo - 1] < rec.cum[lo] - target) lo--;
+  return lo;
+}
+
+function setRecHandle(which, i) {
+  const n = activeRecording().points.length;
+  if (which === 'start') recPickStart = Math.max(0, Math.min(i, recPickEnd - 1));
+  else recPickEnd = Math.min(n - 1, Math.max(i, recPickStart + 1));
+  updateRecordingPick();
+}
+
+function nearerHandle(i) {
+  return Math.abs(i - recPickStart) <= Math.abs(i - recPickEnd) ? 'start' : 'end';
+}
+
+function setRecCursor(i) {
+  const rec = activeRecording();
+  recHoverIdx = i;
+  setSourceData('recording-cursor', i == null || !rec?.points ? emptyFC()
+    : fc([{ type: 'Feature', geometry: { type: 'Point', coordinates: [rec.points[i].lng, rec.points[i].lat] }, properties: {} }]));
+}
+
+function initRecordingProfileHandlers() {
+  const canvas = document.getElementById('recording-profile-canvas');
+  canvas.addEventListener('mousedown', e => {
+    if (!activeRecording()?.points) return;
+    e.preventDefault();
+    const i = recIndexFromClientX(e.clientX);
+    recDraggingHandle = nearerHandle(i);
+    setRecHandle(recDraggingHandle, i);
+  });
+  canvas.addEventListener('mousemove', e => {
+    if (!activeRecording()?.points || recDraggingHandle) return;
+    setRecCursor(recIndexFromClientX(e.clientX));
+    drawRecordingProfile();
+  });
+  canvas.addEventListener('mouseleave', () => {
+    if (recDraggingHandle) return;
+    setRecCursor(null);
+    drawRecordingProfile();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!recDraggingHandle || !activeRecording()?.points) return;
+    const i = recIndexFromClientX(e.clientX);
+    setRecCursor(i);
+    setRecHandle(recDraggingHandle, i);
+  });
+  document.addEventListener('mouseup', () => { recDraggingHandle = null; });
+  window.addEventListener('resize', () => { if (activeRecordingId) drawRecordingProfile(); });
+}
+
+// Map click in recordings mode: snap to the nearest recording point (in screen
+// space, so it behaves the same at every zoom) and move whichever handle is
+// closer along the recording to it.
+function moveNearestHandleToClick(e) {
+  const rec = activeRecording();
+  if (!rec?.points) return;
+  let best = -1, bestD = 25 * 25; // px²
+  for (let i = 0; i < rec.points.length; i++) {
+    const p = map.project([rec.points[i].lng, rec.points[i].lat]);
+    const d = (p.x - e.point.x) ** 2 + (p.y - e.point.y) ** 2;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  if (best < 0) return;
+  setRecHandle(nearerHandle(best), best);
+}
+
+async function extractTrackFromPick() {
+  const rec = activeRecording();
+  if (!rec?.points || !currentProject) return;
+  const a = recPickStart, b = recPickEnd;
+  const slice = rec.points.slice(a, b + 1);
+  if (slice.length < 2) return;
+  const nameInput = document.getElementById('extract-name');
+  const name = nameInput.value.trim() || `${rec.name} – ${tracksFromRecording(rec.id).length + 1}`;
+  const coords = slice.map(p => [p.lng, p.lat]);
+  const msg = document.getElementById('recording-message');
+  msg.textContent = 'Saving…';
+
+  const { data, error } = await sb.from('tracks').insert({
+    project_id: currentProject.id, name, source: 'recording', geom: toEWKT(coords),
+    recording_id: rec.id, recording_start_idx: a, recording_end_idx: b,
+    raw_points: slice, vertex_origin: coords,
+  }).select(TRACK_COLUMNS).single();
+  if (error) { msg.textContent = `Error: ${error.message}`; return; }
+
+  currentTracks.push({ ...data, coords });
+  nameInput.value = '';
+  // Continue from where this one ended.
+  if (b < rec.points.length - 2) { recPickStart = b; recPickEnd = rec.points.length - 1; }
+  renderRecordingList();
+  renderTrackLists();
+  refreshProjectTracksSource();
+  updateRecordingPick();
+  msg.textContent = `Extracted "${name}" — pick the next stretch, or switch to Tracks to edit it.`;
+}
+
+async function renameRecording() {
+  const rec = activeRecording();
+  const name = document.getElementById('recording-name').value.trim();
+  if (!rec || !name || name === rec.name) return;
+  const { error } = await sb.from('recordings').update({ name }).eq('id', rec.id);
+  if (error) { document.getElementById('recording-message').textContent = `Error: ${error.message}`; return; }
+  rec.name = name;
+  renderRecordingList();
+}
+
+async function deleteRecording() {
+  const rec = activeRecording();
+  if (!rec) return;
+  const n = tracksFromRecording(rec.id).length;
+  if (!confirm(`Delete recording "${rec.name}"?` + (n ? ` The ${n} track(s) extracted from it are kept.` : ''))) return;
+  const { error } = await sb.from('recordings').delete().eq('id', rec.id);
+  if (error) { alert(`Could not delete: ${error.message}`); return; }
+  currentRecordings = currentRecordings.filter(r => r.id !== rec.id);
+  currentTracks.forEach(t => { if (t.recording_id === rec.id) t.recording_id = null; });
+  deselectRecording();
+}
+
+// ---------------------------------------------------------------------------
+// Track lists (Tracks mode: pick one to edit; Review mode: fly to + comments)
+// ---------------------------------------------------------------------------
+function activeTrack() { return currentTracks.find(t => t.id === activeTrackId); }
+
+function trackBadge(t) {
+  const T = VIEWER_STYLE.tracks;
+  if (t.is_exported) return { color: T.exported.color, label: 'exported' };
+  if (t.source === 'manual') return { color: T.manual.color, label: 'manual' };
+  if (t.source === 'osm_way') return { color: T.proposed.color, label: 'osm' };
+  return { color: T.proposed.color, label: 'rec' };
+}
+
+function renderTrackLists() {
+  const editUl = document.getElementById('track-list-edit');
+  const reviewUl = document.getElementById('track-list-review');
+  editUl.innerHTML = '';
+  reviewUl.innerHTML = '';
+  if (!currentTracks.length) {
+    const empty = '<li class="item-list-empty">No tracks yet.</li>';
+    editUl.innerHTML = empty;
+    reviewUl.innerHTML = empty;
+    return;
+  }
+  for (const t of currentTracks) {
+    const b = trackBadge(t);
+    const nameHtml = `<span class="item-name">${escapeHtml(t.name || '(untitled)')}</span>`;
+
+    const li = document.createElement('li');
+    li.className = t.id === activeTrackId ? 'active' : '';
+    li.innerHTML = nameHtml + `<span class="track-badge" style="background:${b.color}">${b.label}</span>`;
+    li.addEventListener('click', () => selectTrack(t.id));
+    editUl.appendChild(li);
+
+    const n = projectHistory.filter(r => r.track_id === t.id).length;
+    const li2 = document.createElement('li');
+    li2.className = t.id === activeTrackId ? 'active' : '';
+    li2.innerHTML = nameHtml + `<button class="item-comments-btn" title="Comments on the whole track">💬 ${n}</button>`;
+    li2.addEventListener('click', () => selectTrack(t.id));
+    li2.querySelector('button').addEventListener('click', ev => {
+      ev.stopPropagation();
+      openThread({ trackId: t.id });
+    });
+    reviewUl.appendChild(li2);
+  }
+}
+
+function selectTrack(id, { fit = true } = {}) {
+  // Re-clicking the track already being edited must not restart (and so silently
+  // discard) its edit session.
+  if (id === activeTrackId && (edit?.trackId === id || currentMode !== 'tracks')) {
+    const t = activeTrack();
+    if (fit && t) fitMapToCoords(edit ? edit.coords : t.coords);
+    return;
+  }
+  if (!confirmDiscardEdits()) return;
+  if (manualDrawActive) cancelManualDraw();
+  endEditSession();
+  activeTrackId = id;
+  const t = activeTrack();
+  if (currentMode === 'tracks' && t && currentSession) startEditSession(t);
+  renderTrackLists();
+  refreshProjectTracksSource();
+  if (fit && t) fitMapToCoords(t.coords);
 }
 
 function closeTrackEditor() {
-  stopEditingPoints(false);
+  if (!confirmDiscardEdits()) return;
+  endEditSession();
   activeTrackId = null;
+  renderTrackLists();
+  refreshProjectTracksSource();
+}
+
+// ---------------------------------------------------------------------------
+// Tracks mode — edit session
+// ---------------------------------------------------------------------------
+// All geometry changes happen on edit.coords/edit.origin and are only written
+// to the database on Save. Every change goes through commitEdit(before) with a
+// snapshot taken beforehand, which is what undo restores — whole-array
+// snapshots rather than per-op inverses, so range operations (remove a
+// stretch, simplify part of a track) need no special undo logic.
+//
+// Selection is an inclusive vertex index range [selStart, selEnd]: click a
+// vertex to select it, shift-click another to extend from the anchor.
+// ---------------------------------------------------------------------------
+function setEditorMessage(msg) { document.getElementById('track-editor-message').textContent = msg; }
+
+function startEditSession(track) {
+  const coords = track.coords.slice();
+  const origin = track.vertex_origin && track.vertex_origin.length === coords.length
+    ? track.vertex_origin.slice() : coords.slice();
+  edit = { trackId: track.id, coords, origin, selStart: null, selEnd: null, selAnchor: null, undo: [], redo: [] };
+  document.getElementById('track-editor-wrap').style.display = 'block';
+  document.getElementById('track-editor-name').value = track.name || '';
+  document.getElementById('track-editor-source-badge').textContent =
+    track.source === 'recording' ? 'from recording' : track.source === 'osm_way' ? 'from OSM' : 'manual';
+  document.getElementById('track-mark-exported-btn').textContent = track.is_exported ? 'Unmark exported' : 'Mark exported';
+  document.getElementById('track-simplify-reset').disabled = !track.raw_points;
+  resetSimplifySlider();
+  setEditorMessage('');
+  refreshProjectTracksSource();
+  renderEdit();
+}
+
+function endEditSession() {
+  if (!edit) return;
+  edit = null;
+  vertexDrag = null;
   document.getElementById('track-editor-wrap').style.display = 'none';
-  renderTrackList();
+  ['track-edit-line', 'track-edit-selection', 'track-edit-vertices'].forEach(id => setSourceData(id, emptyFC()));
   refreshProjectTracksSource();
 }
 
-function setTrackEditorMessage(msg) { document.getElementById('track-editor-message').textContent = msg; }
-
-// origin (optional): new vertex_origin baseline to persist alongside coords —
-// passed whenever the point count changed (point-edit save, simplify apply,
-// simplify reset) so the move-clamp's origin array stays index-aligned with
-// geom. Omitted when only re-deriving the same points (nothing calls it that
-// way today, but keeps the function honest about when origin needs updating).
-async function saveTrackGeometry(track, coords, tolerance, origin) {
-  const update = { geom: toEWKT(coords), simplify_tolerance_m: tolerance };
-  if (origin) update.vertex_origin = origin;
-  const { error } = await sb.from('tracks').update(update).eq('id', track.id);
-  if (error) { setTrackEditorMessage(`Error: ${error.message}`); return; }
-  track.coords = coords;
-  track.geojson = { type: 'LineString', coordinates: coords };
-  track.simplify_tolerance_m = tolerance;
-  if (origin) track.vertex_origin = origin;
-  document.getElementById('track-simplify-slider').value = tolerance;
-  document.getElementById('track-simplify-val').textContent = `${tolerance} m`;
-  clearEditLineSource();
-  refreshProjectTracksSource();
-  setTrackEditorMessage('Saved.');
-}
-
-// ---------------------------------------------------------------------------
-// Point editing (drag/insert/delete vertices) — hand-rolled with draggable
-// maplibregl.Markers rather than a drawing library, so there's no dependency
-// whose compatibility with this MapLibre version needs verifying. Practical
-// for the tens-of-points a track has after simplification, not meant for
-// hundreds of raw GPS points — simplify first.
-// ---------------------------------------------------------------------------
-function clearEditMarkers() {
-  editVertexMarkers.forEach(m => m.remove());
-  editVertexMarkers = [];
-}
-
-// ---------------------------------------------------------------------------
-// Undo/redo — in-memory, scoped to the current point-editing session only
-// (cleared on save/close, same as the existing "Reset to raw" precedent for
-// simplify — not a persisted history table). Covers move/delete/insert, the
-// three mutations that operate purely on editWorkingCoords/editVertexOrigin.
-// Split is deliberately NOT part of this stack: it commits immediately as a
-// multi-row DB write (see splitAt below), the same immediacy class as
-// "Apply"/"Delete track" already have.
-// ---------------------------------------------------------------------------
-function pushUndo(cmd) {
-  editUndoStack.push(cmd);
-  editRedoStack = [];
-  updateUndoRedoButtons();
-}
-
-function applyInverse(cmd) {
-  if (cmd.type === 'move') {
-    editWorkingCoords[cmd.index] = cmd.from.slice();
-  } else if (cmd.type === 'delete') {
-    editWorkingCoords.splice(cmd.index, 0, cmd.coord);
-    editVertexOrigin.splice(cmd.index, 0, cmd.origin);
-  } else if (cmd.type === 'insert') {
-    editWorkingCoords.splice(cmd.index, 1);
-    editVertexOrigin.splice(cmd.index, 1);
+function isEditDirty() {
+  if (!edit) return false;
+  const t = currentTracks.find(x => x.id === edit.trackId);
+  if (!t || t.coords.length !== edit.coords.length) return true;
+  for (let i = 0; i < t.coords.length; i++) {
+    if (t.coords[i][0] !== edit.coords[i][0] || t.coords[i][1] !== edit.coords[i][1]) return true;
   }
+  return false;
 }
 
-function applyForward(cmd) {
-  if (cmd.type === 'move') {
-    editWorkingCoords[cmd.index] = cmd.to.slice();
-  } else if (cmd.type === 'delete') {
-    editWorkingCoords.splice(cmd.index, 1);
-    editVertexOrigin.splice(cmd.index, 1);
-  } else if (cmd.type === 'insert') {
-    editWorkingCoords.splice(cmd.index, 0, cmd.coord);
-    editVertexOrigin.splice(cmd.index, 0, cmd.origin);
-  }
+function hasSelection() { return edit && edit.selStart != null; }
+
+function snapshot() {
+  return { coords: edit.coords.slice(), origin: edit.origin.slice(), selStart: edit.selStart, selEnd: edit.selEnd, selAnchor: edit.selAnchor };
+}
+function restore(s) {
+  edit.coords = s.coords; edit.origin = s.origin;
+  edit.selStart = s.selStart; edit.selEnd = s.selEnd; edit.selAnchor = s.selAnchor;
+}
+
+function commitEdit(before) {
+  edit.undo.push(before);
+  edit.redo = [];
+  const n = edit.coords.length;
+  if (hasSelection() && (edit.selEnd >= n || edit.selStart >= n)) clearSelection(true);
+  resetSimplifySlider();
+  renderEdit();
 }
 
 function undoEdit() {
-  const cmd = editUndoStack.pop();
-  if (!cmd) return;
-  applyInverse(cmd);
-  editRedoStack.push(cmd);
-  rebuildEditMarkers(true);
+  if (!edit || !edit.undo.length) return;
+  edit.redo.push(snapshot());
+  restore(edit.undo.pop());
+  resetSimplifySlider();
+  renderEdit();
 }
-
 function redoEdit() {
-  const cmd = editRedoStack.pop();
-  if (!cmd) return;
-  applyForward(cmd);
-  editUndoStack.push(cmd);
-  rebuildEditMarkers(true);
+  if (!edit || !edit.redo.length) return;
+  edit.undo.push(snapshot());
+  restore(edit.redo.pop());
+  resetSimplifySlider();
+  renderEdit();
 }
 
-function updateUndoRedoButtons() {
-  const undoBtn = document.getElementById('track-undo-btn');
-  const redoBtn = document.getElementById('track-redo-btn');
-  if (undoBtn) undoBtn.disabled = editUndoStack.length === 0;
-  if (redoBtn) redoBtn.disabled = editRedoStack.length === 0;
+function clearSelection(silent) {
+  if (!edit) return;
+  edit.selStart = edit.selEnd = edit.selAnchor = null;
+  if (!silent) { resetSimplifySlider(); renderEdit(); }
 }
 
-function rebuildEditMarkers(skipUndoUpdate) {
-  clearEditMarkers();
-  editWorkingCoords.forEach((coord, i) => {
-    const el = document.createElement('div');
-    el.className = 'track-vertex-handle';
-    const marker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat(coord).addTo(map);
-    marker.on('dragend', () => {
-      const { lng, lat } = marker.getLngLat();
-      const from = editWorkingCoords[i];
-      const snapped = findSnapCandidate([lng, lat], activeTrackId, i);
-      const to = clampToOrigin(snapped || [lng, lat], editVertexOrigin[i]);
-      editWorkingCoords[i] = to;
-      pushUndo({ type: 'move', index: i, from, to });
-      // Redraw at the (possibly clamped/snapped) position, not the raw drop point.
-      marker.setLngLat(to);
-      setEditLineSource(editWorkingCoords);
-    });
-    el.addEventListener('dblclick', ev => {
-      ev.stopPropagation();
-      if (editWorkingCoords.length <= 2) return; // a line needs at least 2 points
-      const [coordC] = editWorkingCoords.splice(i, 1);
-      const [originC] = editVertexOrigin.splice(i, 1);
-      pushUndo({ type: 'delete', index: i, coord: coordC, origin: originC });
-      rebuildEditMarkers(true);
-    });
-    // Single click (not the drag) opens split/delete actions for this vertex —
-    // requires a defined direction (first vertex → last), which a track's
-    // coordinate order already gives for free.
-    el.addEventListener('click', ev => {
-      ev.stopPropagation();
-      openVertexActionsPopup(i, coord);
-    });
-    editVertexMarkers.push(marker);
-  });
-  setEditLineSource(editWorkingCoords);
-  if (!skipUndoUpdate) { editUndoStack = []; editRedoStack = []; }
-  updateUndoRedoButtons();
+// previewCoords: draw these instead of edit.coords (simplify slider preview).
+function renderEdit(previewCoords) {
+  if (!edit) return;
+  const coords = previewCoords || edit.coords;
+  setSourceData('track-edit-line', coords.length >= 2 ? fc([lineFeature(coords)]) : emptyFC());
+  const sel = !previewCoords && hasSelection();
+  setSourceData('track-edit-vertices', fc(coords.map((c, i) => ({
+    type: 'Feature', geometry: { type: 'Point', coordinates: c },
+    properties: { i, sel: sel && i >= edit.selStart && i <= edit.selEnd },
+  }))));
+  setSourceData('track-edit-selection', sel && edit.selEnd > edit.selStart
+    ? fc([lineFeature(edit.coords.slice(edit.selStart, edit.selEnd + 1))]) : emptyFC());
+  if (!previewCoords) updateEditorUI();
 }
 
-let vertexActionsPopup = null;
-
-function openVertexActionsPopup(index, coord) {
-  if (vertexActionsPopup) vertexActionsPopup.remove();
-  const canSplit = index > 0 && index < editWorkingCoords.length - 1;
-  vertexActionsPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '200px' })
-    .setLngLat(coord)
-    .setHTML(`
-      <div class="popup-trail-actions">
-        ${canSplit ? `<button id="vertex-split-before">Split before</button>
-        <button id="vertex-split-after">Split after</button>` : ''}
-        <button id="vertex-delete">Delete vertex</button>
-      </div>`)
-    .addTo(map);
-  const el = vertexActionsPopup.getElement();
-  const splitBefore = el.querySelector('#vertex-split-before');
-  const splitAfter  = el.querySelector('#vertex-split-after');
-  const delBtn      = el.querySelector('#vertex-delete');
-  if (splitBefore) splitBefore.addEventListener('click', () => { vertexActionsPopup.remove(); splitAt(index - 1); });
-  if (splitAfter)  splitAfter.addEventListener('click',  () => { vertexActionsPopup.remove(); splitAt(index); });
-  if (delBtn) delBtn.addEventListener('click', () => {
-    vertexActionsPopup.remove();
-    if (editWorkingCoords.length <= 2) return;
-    const [coordC] = editWorkingCoords.splice(index, 1);
-    const [originC] = editVertexOrigin.splice(index, 1);
-    pushUndo({ type: 'delete', index, coord: coordC, origin: originC });
-    rebuildEditMarkers(true);
-  });
+function pathLengthMeters(coords) {
+  let m = 0;
+  for (let i = 1; i < coords.length; i++) m += distMeters(coords[i - 1], coords[i]);
+  return m;
 }
 
-function startEditingPoints() {
-  const track = activeTrack();
-  if (!track) return;
-  editingPoints = true;
-  editWorkingCoords = track.coords.map(c => c.slice());
-  editVertexOrigin = (track.vertex_origin || track.coords).map(c => c.slice());
-  editUndoStack = [];
-  editRedoStack = [];
-  document.getElementById('track-edit-points-btn').textContent = 'Save points';
-  refreshProjectTracksSource();
-  rebuildEditMarkers();
-}
+function updateEditorUI() {
+  if (!edit) return;
+  const n = edit.coords.length;
+  document.getElementById('track-undo-btn').disabled = !edit.undo.length;
+  document.getElementById('track-redo-btn').disabled = !edit.redo.length;
+  const dirty = isEditDirty();
+  document.getElementById('track-save-btn').disabled = !dirty;
+  document.getElementById('track-discard-btn').disabled = !dirty;
+  document.getElementById('track-point-count').textContent = `${n} points · ${formatKm(pathLengthMeters(edit.coords))}`;
 
-function stopEditingPoints(save) {
-  if (!editingPoints) { clearEditMarkers(); return; }
-  editingPoints = false;
-  document.getElementById('track-edit-points-btn').textContent = 'Edit points';
-  clearEditMarkers();
-  clearEditLineSource();
-  editUndoStack = [];
-  editRedoStack = [];
-  updateUndoRedoButtons();
-  const track = activeTrack();
-  if (save && track && editWorkingCoords.length >= 2) {
-    saveTrackGeometry(track, editWorkingCoords, track.simplify_tolerance_m || 0, editVertexOrigin);
+  const info = document.getElementById('track-selection-info');
+  const sel = hasSelection();
+  if (!sel) {
+    info.textContent = 'Nothing selected — click a point, shift-click another to select the stretch between.';
+  } else if (edit.selStart === edit.selEnd) {
+    info.textContent = `Point ${edit.selStart + 1} of ${n} selected.`;
   } else {
-    refreshProjectTracksSource();
+    const len = pathLengthMeters(edit.coords.slice(edit.selStart, edit.selEnd + 1));
+    info.textContent = `Points ${edit.selStart + 1}–${edit.selEnd + 1} selected (${formatKm(len)}).`;
+  }
+  document.getElementById('sel-remove-btn').disabled = !sel;
+  document.getElementById('sel-split-btn').disabled = !sel || !splitCuts().length;
+  document.getElementById('sel-clear-btn').disabled = !sel;
+  document.getElementById('track-simplify-label').textContent =
+    simplifyRange()[0] === 0 && simplifyRange()[1] === n - 1 ? 'Simplify whole track' : 'Simplify selection';
+}
+
+// --- vertex drag / click-to-select ---
+function onVertexMouseDown(e) {
+  if (!edit || currentMode !== 'tracks' || manualDrawActive) return;
+  if (e.originalEvent.button !== 0) return;
+  e.preventDefault(); // stops the map's drag-pan for this gesture
+  const i = e.features[0].properties.i;
+  vertexDrag = { i, startPt: e.point, moved: false, before: snapshot(), shift: e.originalEvent.shiftKey };
+  map.on('mousemove', onVertexDragMove);
+  // On window, not the map — a drag released outside the canvas must still end.
+  window.addEventListener('mouseup', onVertexMouseUp, { once: true });
+}
+
+function onVertexDragMove(e) {
+  const d = vertexDrag;
+  if (!d || !edit) return;
+  if (!d.moved && Math.hypot(e.point.x - d.startPt.x, e.point.y - d.startPt.y) < 3) return;
+  d.moved = true;
+  edit.coords[d.i] = [e.lngLat.lng, e.lngLat.lat];
+  renderEdit();
+}
+
+function onVertexMouseUp(ev) {
+  map.off('mousemove', onVertexDragMove);
+  const d = vertexDrag;
+  vertexDrag = null;
+  if (!d || !edit) return;
+  if (d.moved) {
+    const rect = map.getCanvasContainer().getBoundingClientRect();
+    const ll = map.unproject([ev.clientX - rect.left, ev.clientY - rect.top]);
+    const raw = [ll.lng, ll.lat];
+    const snapped = findSnapCandidate(raw, edit.trackId, d.i);
+    edit.coords[d.i] = clampToOrigin(snapped || raw, edit.origin[d.i]);
+    commitEdit(d.before);
+  } else {
+    if (d.shift && edit.selAnchor != null) {
+      edit.selStart = Math.min(edit.selAnchor, d.i);
+      edit.selEnd = Math.max(edit.selAnchor, d.i);
+    } else if (edit.selStart === d.i && edit.selEnd === d.i) {
+      clearSelection(true); // clicking the lone selected point again deselects it
+    } else {
+      edit.selAnchor = edit.selStart = edit.selEnd = d.i;
+    }
+    resetSimplifySlider();
+    renderEdit();
   }
 }
 
-// ---------------------------------------------------------------------------
-// Split — commits immediately as two DB writes (not part of the undo stack,
-// same immediacy class as "Apply"/"Delete track"). Requires a defined
-// direction (first vertex → last), which the coordinate order already gives.
-// The truncated head keeps the original row's id; the tail becomes a new row
-// in the same track_group_id, ordered after every existing sibling. Both
-// halves keep the same source/source_osm_* — splitting an OSM-sourced segment
-// needs no special-casing of the hidden-osm-id set, since it's carried over
-// unmodified to both rows.
-// ---------------------------------------------------------------------------
-async function splitAt(index) {
-  const track = activeTrack();
-  if (!track || index <= 0 || index >= editWorkingCoords.length - 1) return;
-  if (!confirm('Split this trail into two segments here?')) return;
+// --- operations ---
+function insertVertexAt(pt) {
+  const before = snapshot();
+  const idx = nearestSegmentIndex(edit.coords, pt) + 1;
+  edit.coords.splice(idx, 0, pt);
+  edit.origin.splice(idx, 0, pt.slice()); // a new vertex's own creation point is its origin
+  if (hasSelection()) {
+    if (edit.selStart >= idx) edit.selStart++;
+    if (edit.selEnd >= idx) edit.selEnd++;
+    if (edit.selAnchor >= idx) edit.selAnchor++;
+  }
+  commitEdit(before);
+}
 
-  const headCoords = editWorkingCoords.slice(0, index + 1);
-  const headOrigin = editVertexOrigin.slice(0, index + 1);
-  const tailCoords = editWorkingCoords.slice(index);
-  const tailOrigin = editVertexOrigin.slice(index);
+// Removes the selected vertices; their neighbours get joined directly. A
+// selection touching either end of the track trims that end.
+function removeSelection() {
+  if (!hasSelection()) return;
+  const i = edit.selStart, j = edit.selEnd;
+  if (edit.coords.length - (j - i + 1) < 2) { setEditorMessage('A track needs at least 2 points — can\'t remove that much.'); return; }
+  const before = snapshot();
+  edit.coords.splice(i, j - i + 1);
+  edit.origin.splice(i, j - i + 1);
+  clearSelection(true);
+  setEditorMessage('');
+  commitEdit(before);
+}
 
+// The stretch simplify applies to: the selection if it spans at least one
+// interior point, otherwise the whole track.
+function simplifyRange() {
+  const n = edit.coords.length;
+  if (hasSelection() && edit.selEnd - edit.selStart >= 2) return [edit.selStart, edit.selEnd];
+  return [0, n - 1];
+}
+
+function simplifiedResult(tol) {
+  const [i, j] = simplifyRange();
+  const sub = simplifyLngLatWithOrigin(edit.coords.slice(i, j + 1), edit.origin.slice(i, j + 1), tol);
+  return {
+    coords: [...edit.coords.slice(0, i), ...sub.coords, ...edit.coords.slice(j + 1)],
+    origin: [...edit.origin.slice(0, i), ...sub.origin, ...edit.origin.slice(j + 1)],
+    i, newEnd: i + sub.coords.length - 1,
+  };
+}
+
+function resetSimplifySlider() {
+  document.getElementById('track-simplify-slider').value = 0;
+  document.getElementById('track-simplify-val').textContent = '0 m';
+  document.getElementById('track-simplify-apply').disabled = true;
+}
+
+function previewSimplify(tol) {
+  if (!edit) return;
+  document.getElementById('track-simplify-apply').disabled = tol <= 0;
+  if (tol <= 0) { document.getElementById('track-simplify-val').textContent = '0 m'; renderEdit(); return; }
+  const r = simplifiedResult(tol);
+  document.getElementById('track-simplify-val').textContent = `${tol} m · ${edit.coords.length} → ${r.coords.length} pts`;
+  renderEdit(r.coords);
+}
+
+function applySimplify() {
+  if (!edit) return;
+  const tol = parseFloat(document.getElementById('track-simplify-slider').value);
+  if (!(tol > 0)) return;
+  const before = snapshot();
+  const r = simplifiedResult(tol);
+  const wasRange = hasSelection() && edit.selEnd - edit.selStart >= 2;
+  edit.coords = r.coords;
+  edit.origin = r.origin;
+  if (wasRange) { edit.selStart = r.i; edit.selEnd = r.newEnd; edit.selAnchor = r.i; }
+  commitEdit(before);
+}
+
+function resetToRaw() {
+  const track = currentTracks.find(t => t.id === edit?.trackId);
+  if (!track?.raw_points) return;
+  const before = snapshot();
+  edit.coords = track.raw_points.map(p => [p.lng, p.lat]);
+  edit.origin = edit.coords.slice();
+  clearSelection(true);
+  commitEdit(before);
+}
+
+async function saveEdit() {
+  if (!edit) return;
+  const track = currentTracks.find(t => t.id === edit.trackId);
+  if (!track) return;
+  const coords = edit.coords.slice(), origin = edit.origin.slice();
+  setEditorMessage('Saving…');
+  const { error } = await sb.from('tracks').update({ geom: toEWKT(coords), vertex_origin: origin }).eq('id', track.id);
+  if (error) { setEditorMessage(`Error: ${error.message}`); return; }
+  track.coords = coords;
+  track.vertex_origin = origin;
+  setEditorMessage('Saved.');
+  updateEditorUI();
+}
+
+function discardEdit() {
+  const track = currentTracks.find(t => t.id === edit?.trackId);
+  if (!track) return;
+  if (!confirm('Discard all unsaved changes to this track?')) return;
+  startEditSession(track);
+}
+
+// --- split ---
+// Cut points: the selection's boundaries, minus any that are a track end.
+// One selected point = split in two there; a stretch = up to three tracks
+// (before / the stretch / after).
+function splitCuts() {
+  if (!hasSelection()) return [];
+  const n = edit.coords.length;
+  return [...new Set([edit.selStart, edit.selEnd])].filter(k => k > 0 && k < n - 1).sort((a, b) => a - b);
+}
+
+// The raw_points/recording range that corresponds to a piece of a split track:
+// nearest raw point to the piece's first vertex, then nearest after that to its
+// last. Falls back to the parent's whole range if that doesn't come out ordered
+// (e.g. an out-and-back where both ends sit on the same spot).
+function rawFieldsForPiece(track, coords) {
+  if (!track.raw_points?.length) return { raw_points: null };
+  const raw = track.raw_points;
+  const nearestFrom = (c, from) => {
+    let best = from, bestD = Infinity;
+    for (let k = from; k < raw.length; k++) {
+      const d = (raw[k].lng - c[0]) ** 2 + (raw[k].lat - c[1]) ** 2;
+      if (d < bestD) { bestD = d; best = k; }
+    }
+    return best;
+  };
+  const a = nearestFrom(coords[0], 0);
+  const b = nearestFrom(coords[coords.length - 1], a);
+  if (b <= a) {
+    return { raw_points: raw, recording_start_idx: track.recording_start_idx, recording_end_idx: track.recording_end_idx };
+  }
+  const base = track.recording_start_idx;
+  return {
+    raw_points: raw.slice(a, b + 1),
+    recording_start_idx: base != null ? base + a : null,
+    recording_end_idx: base != null ? base + b : null,
+  };
+}
+
+async function splitAtSelection() {
+  const track = currentTracks.find(t => t.id === edit?.trackId);
+  const cuts = splitCuts();
+  if (!track || !cuts.length) return;
+  const bounds = [0, ...cuts, edit.coords.length - 1];
+  const pieces = [];
+  for (let k = 0; k < bounds.length - 1; k++) {
+    pieces.push({ coords: edit.coords.slice(bounds[k], bounds[k + 1] + 1), origin: edit.origin.slice(bounds[k], bounds[k + 1] + 1) });
+  }
+  if (!confirm(`Split "${track.name || 'this track'}" into ${pieces.length} tracks? `
+    + 'This saves immediately, including any unsaved edits.')) return;
+
+  const base = track.name || 'Track';
+  // All against the parent's (still unsplit) raw_points, before anything mutates it.
+  const raws = pieces.map(p => rawFieldsForPiece(track, p.coords));
+  const first = pieces[0];
   const { error: updErr } = await sb.from('tracks')
-    .update({ geom: toEWKT(headCoords), vertex_origin: headOrigin })
+    .update({ geom: toEWKT(first.coords), vertex_origin: first.origin, ...raws[0] })
     .eq('id', track.id);
-  if (updErr) { alert(`Could not split: ${updErr.message}`); return; }
+  if (updErr) { setEditorMessage(`Could not split: ${updErr.message}`); return; }
 
-  const groupOrders = currentTracks
-    .filter(t => t.track_group_id === track.track_group_id)
-    .map(t => t.segment_order ?? 0);
-  const nextOrder = Math.max(0, ...groupOrders) + 1;
-
-  const { data, error } = await sb.from('tracks').insert({
+  const rows = pieces.slice(1).map((p, k) => ({
     project_id: currentProject.id,
-    name: track.name ? `${track.name} (split)` : 'Split segment',
+    name: `${base} (${k + 2})`,
     source: track.source,
-    geom: toEWKT(tailCoords),
-    raw_points: track.raw_points,
+    geom: toEWKT(p.coords),
+    vertex_origin: p.origin,
+    recording_id: track.recording_id,
+    ...raws[k + 1],
     source_osm_type: track.source_osm_type,
     source_osm_id: track.source_osm_id,
     source_osm_way_ids: track.source_osm_way_ids || [],
-    vertex_origin: tailOrigin,
-    track_group_id: track.track_group_id,
-    segment_order: nextOrder,
-  }).select('id,name,source,simplify_tolerance_m,is_exported,created_at,source_osm_type,'
-    + 'source_osm_id,source_osm_way_ids,vertex_origin,track_group_id,segment_order,raw_points').single();
-  if (error) { alert(`Could not create the split segment: ${error.message}`); return; }
+  }));
+  Object.assign(track, raws[0], { coords: first.coords, vertex_origin: first.origin });
+  const { data, error } = await sb.from('tracks').insert(rows).select(TRACK_COLUMNS);
+  if (error) { setEditorMessage(`First part saved, but creating the rest failed: ${error.message}`); return; }
+  // Insert returns rows in insertion order; pair them back up with their coords.
+  data.forEach((row, k) => currentTracks.push({ ...row, coords: pieces[k + 1].coords }));
 
-  track.coords = headCoords;
-  track.geojson = { type: 'LineString', coordinates: headCoords };
-  track.vertex_origin = headOrigin;
-  currentTracks.push({ ...data, coords: tailCoords, geojson: { type: 'LineString', coordinates: tailCoords } });
-
-  stopEditingPoints(false);
-  renderTrackList();
+  startEditSession(track);
+  renderTrackLists();
   refreshProjectTracksSource();
-  selectTrack(track.id);
+  setEditorMessage(`Split into ${pieces.length} tracks.`);
+}
+
+// --- per-track metadata actions ---
+async function renameActiveTrack() {
+  const track = activeTrack();
+  if (!track) return;
+  const name = document.getElementById('track-editor-name').value.trim();
+  const { error } = await sb.from('tracks').update({ name }).eq('id', track.id);
+  if (error) { setEditorMessage(`Error: ${error.message}`); return; }
+  track.name = name;
+  renderTrackLists();
+}
+
+async function toggleExported() {
+  const track = activeTrack();
+  if (!track) return;
+  const next = !track.is_exported;
+  const { error } = await sb.from('tracks').update({ is_exported: next }).eq('id', track.id);
+  if (error) { setEditorMessage(`Error: ${error.message}`); return; }
+  track.is_exported = next;
+  document.getElementById('track-mark-exported-btn').textContent = next ? 'Unmark exported' : 'Mark exported';
+  renderTrackLists();
+  refreshProjectTracksSource();
+}
+
+async function deleteActiveTrack() {
+  const track = activeTrack();
+  if (!track) return;
+  if (!confirm(`Delete "${track.name || 'this track'}"? This cannot be undone.`)) return;
+  const { error } = await sb.from('tracks').delete().eq('id', track.id);
+  if (error) { alert(`Could not delete: ${error.message}`); return; }
+  currentTracks = currentTracks.filter(t => t.id !== track.id);
+  projectHistory = projectHistory.filter(r => r.track_id !== track.id); // cascaded server-side
+  endEditSession();
+  activeTrackId = null;
+  renderTrackLists();
+  refreshProjectTracksSource();
+  refreshHiddenOsmIds();
 }
 
 // ---------------------------------------------------------------------------
-// Manual trail drawing — click the map to add points, same preview line/vertex
-// styling as point-editing above.
+// Manual drawing — click the map to add points; reuses the edit-line layer
+// for the preview (no edit session is active while drawing).
 // ---------------------------------------------------------------------------
 function startManualDraw() {
   if (!currentProject || !currentSession) return;
+  if (!confirmDiscardEdits()) return;
+  endEditSession();
+  activeTrackId = null;
+  renderTrackLists();
   manualDrawActive = true;
   manualDrawCoords = [];
-  clearManualDrawMarkers();
-  document.getElementById('track-manual-btn').textContent = 'Finish drawing';
-  map.getCanvas().style.cursor = 'crosshair';
+  document.getElementById('track-manual-btn').textContent = 'Finish drawing (Esc cancels)';
+  renderManualDraw();
 }
 
-function clearManualDrawMarkers() {
-  manualDrawMarkers.forEach(m => m.remove());
-  manualDrawMarkers = [];
+function renderManualDraw() {
+  setSourceData('track-edit-line', manualDrawCoords.length >= 2 ? fc([lineFeature(manualDrawCoords)]) : emptyFC());
+  setSourceData('track-edit-vertices', fc(manualDrawCoords.map((c, i) => ({
+    type: 'Feature', geometry: { type: 'Point', coordinates: c }, properties: { i, sel: false },
+  }))));
 }
 
 function addManualDrawPoint(lngLat) {
   manualDrawCoords.push([lngLat.lng, lngLat.lat]);
-  const el = document.createElement('div');
-  el.className = 'track-vertex-handle';
-  manualDrawMarkers.push(new maplibregl.Marker({ element: el }).setLngLat(lngLat).addTo(map));
-  setEditLineSource(manualDrawCoords);
+  renderManualDraw();
+}
+
+function cancelManualDraw() {
+  manualDrawActive = false;
+  manualDrawCoords = [];
+  document.getElementById('track-manual-btn').textContent = 'Draw new track';
+  ['track-edit-line', 'track-edit-vertices'].forEach(id => setSourceData(id, emptyFC()));
+  map.getCanvas().style.cursor = '';
 }
 
 async function finishManualDraw() {
-  manualDrawActive = false;
-  map.getCanvas().style.cursor = '';
-  document.getElementById('track-manual-btn').textContent = 'Draw manual track';
-  clearEditLineSource();
   const coords = manualDrawCoords;
-  clearManualDrawMarkers();
+  cancelManualDraw();
   if (coords.length < 2) return;
-
   const { data, error } = await sb.from('tracks').insert({
-    project_id: currentProject.id, name: 'New manual track', source: 'manual',
+    project_id: currentProject.id, name: 'New track', source: 'manual',
     geom: toEWKT(coords), vertex_origin: coords,
-  }).select('id,name,source,simplify_tolerance_m,is_exported,created_at,vertex_origin,'
-    + 'track_group_id,segment_order').single();
+  }).select(TRACK_COLUMNS).single();
   if (error) { alert(`Could not save track: ${error.message}`); return; }
-
-  currentTracks.push({ ...data, raw_points: null, coords, geojson: { type: 'LineString', coordinates: coords } });
-  renderTrackList();
-  refreshProjectTracksSource();
-  selectTrack(data.id);
+  currentTracks.push({ ...data, coords });
+  selectTrack(data.id, { fit: false });
 }
 
 // ---------------------------------------------------------------------------
-// Add from an existing OSM way/relation — called from index.html's trail
-// popup, which does the OSM-specific work (fragment collection across clipped
-// vector tiles, then stitching them into one ordered line — see
-// stitchFragments in index.html) and hands this plain data across. Exposed as
-// a global the same way index.html exposes window.onTracksAuthChange to this
-// file, just in the other direction.
+// Copy from an existing OSM way/relation — called from index.html's trail
+// popup, which collects/stitches the clipped vector-tile fragments (see
+// stitchFragments there) and hands plain data across.
 //
 // wayIds is every fragment's own way-level osm_id (never a relation id, since
 // line features don't carry one) — this becomes source_osm_way_ids, which
-// drives which OSM ways get hidden from the base map layers while this
-// segment exists (see refreshHiddenOsmIds/applyHiddenOsmIdsFilter below).
+// drives which OSM ways get hidden from the base map while this copy exists.
 // ---------------------------------------------------------------------------
 window.addTrackFromOsmWay = async function (coords, identity, wayIds) {
   if (!currentProject || !currentSession) { alert('Open a project and log in first.'); return; }
   if (!coords || coords.length < 2) return;
+  if (!confirmDiscardEdits()) return;
 
   const { data, error } = await sb.from('tracks').insert({
     project_id: currentProject.id,
@@ -1068,23 +1679,20 @@ window.addTrackFromOsmWay = async function (coords, identity, wayIds) {
     source_osm_type: identity.osm_type,
     source_osm_id: identity.osm_id,
     source_osm_way_ids: wayIds || [],
-  }).select('id,name,source,simplify_tolerance_m,is_exported,created_at,source_osm_type,'
-    + 'source_osm_id,source_osm_way_ids,vertex_origin,track_group_id,segment_order').single();
+  }).select(TRACK_COLUMNS).single();
   if (error) { alert(`Could not import trail: ${error.message}`); return; }
 
-  currentTracks.push({ ...data, raw_points: null, coords, geojson: { type: 'LineString', coordinates: coords } });
-  renderTrackList();
-  refreshProjectTracksSource();
+  currentTracks.push({ ...data, coords });
   refreshHiddenOsmIds();
-  selectTrack(data.id);
+  // Already confirmed above, so force — setMode then starts the edit session
+  // on the new track since it's the active one.
+  activeTrackId = data.id;
+  setMode('tracks', { force: true });
 };
 
 // Every way-level osm_id belonging to an osm_way-sourced track in the open
-// project should be hidden from the base OSM line layers (index.html defines
-// OSM_TRAIL_LINE_LAYERS and applies the filter here computes) — otherwise the
-// copied-for-editing trail would render twice, once as the live OSM way and
-// once as the editable segment. Called after opening/closing a project and
-// after any track insert/delete/split that could change the set.
+// project is hidden from the base OSM line layers (index.html defines
+// OSM_TRAIL_LINE_LAYERS) — otherwise the copied trail would render twice.
 function refreshHiddenOsmIds() {
   hiddenOsmWayIds = new Set(
     currentTracks.filter(t => t.source === 'osm_way').flatMap(t => t.source_osm_way_ids || [])
@@ -1102,128 +1710,275 @@ function applyHiddenOsmIdsFilter() {
 window.applyHiddenOsmIdsFilter = applyHiddenOsmIdsFilter;
 
 // ---------------------------------------------------------------------------
-// FIT import — parse, show an elevation-profile chunk picker, save a chunk as
-// a new track. The panel stays open after each save so several chunks can be
-// cut from the same ride without re-uploading.
+// Comments/photos — project-level threads. A thread is a point (point_id), a
+// whole track (track_id), or the project as a whole (neither). Reads go
+// through get_public_project_history (everything for the project in one call;
+// the open thread is a client-side filter), writes through add_project_comment
+// — the only anonymous write path in the schema. Photo upload and entry
+// deletion are authenticated-only.
 // ---------------------------------------------------------------------------
-function closeFitImport() {
-  document.getElementById('fit-import-wrap').style.display = 'none';
-  fitRecords = null;
-  fitDraggingHandle = null;
-  clearFitImportSources();
+async function refreshHistory() {
+  if (!currentProject) return;
+  const { data, error } = await sb.rpc('get_public_project_history', { p_project_id: currentProject.id });
+  if (error) { console.error(error); return; }
+  projectHistory = data || [];
+  refreshPointsSource();
+  renderTrackLists();
+  const general = projectHistory.filter(r => !r.point_id && !r.track_id).length;
+  document.getElementById('project-comments-btn').textContent = `Project comments (${general})`;
 }
 
-function drawFitProfile() {
-  const canvas = document.getElementById('fit-profile-canvas');
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height, pad = 8;
-  ctx.clearRect(0, 0, w, h);
-  if (!fitRecords || fitRecords.length < 2) return;
+function ensureLocalPoint(id, lng, lat) {
+  if (currentPoints.some(p => p.id === id)) return;
+  currentPoints.push({ id, geojson: { type: 'Point', coordinates: [lng, lat] }, label: null });
+}
 
-  const n = fitRecords.length;
-  const xAt = i => pad + (i / (n - 1)) * (w - pad * 2);
-  const eles = fitRecords.map(r => r.ele).filter(e => e != null);
-  const minE = eles.length ? Math.min(...eles) : 0;
-  const maxE = eles.length ? Math.max(...eles) : 1;
-  const span = Math.max(1, maxE - minE);
+function threadTitle() {
+  if (thread.trackId) {
+    return currentTracks.find(t => t.id === thread.trackId)?.name || 'Track';
+  }
+  if (thread.pointId) {
+    const p = currentPoints.find(x => x.id === thread.pointId);
+    if (!p) return 'Point';
+    let best = null, bestD = 30; // only name a track the point is actually on
+    for (const t of currentTracks) {
+      const d = distToLineMeters(p.geojson.coordinates, t.coords);
+      if (d < bestD) { bestD = d; best = t; }
+    }
+    return best ? `${best.name || 'Track'} — this point` : 'This point';
+  }
+  return `${currentProject.name} — general`;
+}
 
-  ctx.fillStyle = 'rgba(255, 225, 77, 0.15)';
-  ctx.fillRect(xAt(fitChunkStart), 0, xAt(fitChunkEnd) - xAt(fitChunkStart), h);
+function openThread({ pointId = null, trackId = null } = {}) {
+  thread = { pointId, trackId };
+  document.getElementById('track-comments-title').textContent = threadTitle();
+  document.getElementById('track-comment-name').style.display = currentSession ? 'none' : 'block';
+  document.getElementById('track-comment-photo').style.display = currentSession ? 'block' : 'none';
+  document.getElementById('track-comment-text').value = '';
+  document.getElementById('track-comment-message').textContent = '';
+  document.getElementById('track-comments-wrap').style.display = 'flex';
+  renderThread();
+}
 
-  ctx.strokeStyle = '#5ba4cf';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  fitRecords.forEach((r, i) => {
-    const x = xAt(i);
-    const y = eles.length ? h - pad - ((r.ele ?? minE) - minE) / span * (h - pad * 2) : h / 2;
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+// Click on a track in Review mode: resolve (snapping to an existing nearby
+// point if there is one) and open that point's thread.
+async function openThreadAtClick(lngLat) {
+  const { data: pointId, error } = await sb.rpc('find_or_create_project_point', {
+    p_project_id: currentProject.id, p_lng: lngLat.lng, p_lat: lngLat.lat,
   });
-  ctx.stroke();
+  if (error) { alert(`Could not resolve a location: ${error.message}`); return; }
+  ensureLocalPoint(pointId, lngLat.lng, lngLat.lat);
+  openThread({ pointId });
+}
 
-  ctx.strokeStyle = '#ffe14d';
-  ctx.lineWidth = 2;
-  [fitChunkStart, fitChunkEnd].forEach(i => {
-    ctx.beginPath();
-    ctx.moveTo(xAt(i), 0);
-    ctx.lineTo(xAt(i), h);
-    ctx.stroke();
+function closeThread() {
+  document.getElementById('track-comments-wrap').style.display = 'none';
+  thread = null;
+}
+
+function renderThread() {
+  if (!thread) return;
+  const list = document.getElementById('track-comments-list');
+  const rows = projectHistory.filter(r =>
+    (r.point_id || null) === thread.pointId && (r.track_id || null) === thread.trackId);
+  if (!rows.length) { list.innerHTML = '<div class="history-empty">No comments yet.</div>'; return; }
+
+  historyImagePaths.clear();
+  const items = rows.map(row => {
+    const when = new Date(row.created_at).toLocaleString();
+    const who = row.author_name ? escapeHtml(row.author_name) : 'Project member';
+    let body;
+    if (row.entry_type === 'image') {
+      historyImagePaths.set(row.id, row.value.path);
+      const { data: pub } = sb.storage.from('track-images').getPublicUrl(row.value.path);
+      body = `<img src="${pub.publicUrl}" class="history-thumb">`;
+    } else {
+      body = escapeHtml(row.value.text || '');
+    }
+    // Delete is authenticated-only (moderation by the trusted group). Own class
+    // + listener so index.html's trail_history delete handler never catches it.
+    const deleteHtml = currentSession
+      ? `<button class="history-delete track-history-delete" data-entry-id="${row.id}" title="Delete this entry">✕</button>`
+      : '';
+    return `<li><strong>${who}</strong><br>${body}<br><small>${when}</small>${deleteHtml}</li>`;
   });
+  list.innerHTML = `<ul class="history-list">${items.join('')}</ul>`;
 }
 
-function fitIndexFromClientX(clientX) {
-  const canvas = document.getElementById('fit-profile-canvas');
-  const rect = canvas.getBoundingClientRect();
-  const pad = 8;
-  const scaleX = canvas.width / rect.width; // canvas internal width vs. CSS (100%) width can differ
-  const xCanvas = (clientX - rect.left) * scaleX;
-  const frac = (xCanvas - pad) / (canvas.width - pad * 2);
-  return Math.round(Math.max(0, Math.min(1, frac)) * (fitRecords.length - 1));
-}
-
-function moveFitHandle(i) {
-  if (fitDraggingHandle === 'start') fitChunkStart = i; else fitChunkEnd = i;
-  fitChunkStart = Math.max(0, Math.min(fitChunkStart, fitRecords.length - 2));
-  fitChunkEnd = Math.max(fitChunkStart + 1, Math.min(fitChunkEnd, fitRecords.length - 1));
-  drawFitProfile();
-  updateFitChunkSource();
-}
-
-function initFitProfileDragHandlers() {
-  const canvas = document.getElementById('fit-profile-canvas');
-  canvas.addEventListener('mousedown', e => {
-    if (!fitRecords) return;
-    const i = fitIndexFromClientX(e.clientX);
-    fitDraggingHandle = Math.abs(i - fitChunkStart) <= Math.abs(i - fitChunkEnd) ? 'start' : 'end';
-    moveFitHandle(i);
+async function submitComment() {
+  const textEl = document.getElementById('track-comment-text');
+  const text = textEl.value.trim();
+  if (!text || !thread) return;
+  const name = document.getElementById('track-comment-name').value.trim();
+  const msg = document.getElementById('track-comment-message');
+  msg.textContent = 'Saving…';
+  const { error } = await sb.rpc('add_project_comment', {
+    p_project_id: currentProject.id, p_text: text, p_author_name: currentSession ? null : name,
+    p_point_id: thread.pointId, p_track_id: thread.trackId,
   });
-  document.addEventListener('mousemove', e => {
-    if (!fitDraggingHandle) return;
-    moveFitHandle(fitIndexFromClientX(e.clientX));
-  });
-  document.addEventListener('mouseup', () => { fitDraggingHandle = null; });
+  if (error) { msg.textContent = `Error: ${error.message}`; return; }
+  textEl.value = '';
+  msg.textContent = '';
+  await refreshHistory();
+  renderThread();
 }
 
-async function handleFitFileChosen(file) {
-  const statusEl = document.getElementById('fit-import-status');
-  statusEl.textContent = 'Parsing…';
+async function uploadImageEntry(file, pointId, trackId) {
+  const path = `${currentProject.id}/${crypto.randomUUID()}-${file.name}`;
+  const { error: upErr } = await sb.storage.from('track-images').upload(path, file);
+  if (upErr) throw upErr;
+  const { error } = await sb.from('project_history').insert({
+    project_id: currentProject.id, point_id: pointId, track_id: trackId, entry_type: 'image',
+    value: { path, content_type: file.type, size_bytes: file.size },
+  });
+  if (error) throw error;
+}
+
+async function uploadThreadPhoto(file) {
+  const msg = document.getElementById('track-comment-message');
+  msg.textContent = 'Uploading…';
   try {
-    fitRecords = await parseTrackFile(file);
-    statusEl.textContent = `Parsed ${fitRecords.length} GPS points.`;
-    fitChunkStart = 0;
-    fitChunkEnd = fitRecords.length - 1;
-    document.getElementById('fit-import-profile-wrap').style.display = 'block';
-    setFitImportFullSource();
-    drawFitProfile();
-    updateFitChunkSource();
-    fitMapToCoords(fitRecords.map(r => [r.lng, r.lat]));
+    await uploadImageEntry(file, thread.pointId, thread.trackId);
+    msg.textContent = '';
+    await refreshHistory();
+    renderThread();
   } catch (err) {
-    statusEl.textContent = `Could not parse this file: ${err.message}`;
-    document.getElementById('fit-import-profile-wrap').style.display = 'none';
+    msg.textContent = `Error: ${err.message}`;
   }
 }
 
-async function addFitChunkAsTrack() {
-  if (!fitRecords || !currentProject) return;
-  const slice = fitRecords.slice(fitChunkStart, fitChunkEnd + 1);
-  if (slice.length < 2) return;
-  const nameInput = document.getElementById('fit-import-chunk-name');
-  const name = nameInput.value.trim() || `Chunk ${new Date().toLocaleDateString()}`;
-  const coords = slice.map(r => [r.lng, r.lat]);
-  const statusEl = document.getElementById('fit-import-status');
-  statusEl.textContent = 'Saving…';
+async function deleteHistoryEntry(entryId) {
+  if (!confirm('Delete this entry? This cannot be undone.')) return;
+  const { error } = await sb.from('project_history').delete().eq('id', entryId);
+  if (error) { alert(`Could not delete: ${error.message}`); return; }
+  const path = historyImagePaths.get(entryId);
+  if (path) {
+    const { error: rmErr } = await sb.storage.from('track-images').remove([path]);
+    if (rmErr) console.error('Could not remove storage object for deleted entry', rmErr);
+  }
+  await refreshHistory();
+  renderThread();
+}
 
-  const { data, error } = await sb.from('tracks').insert({
-    project_id: currentProject.id, name, source: 'fit_upload', geom: toEWKT(coords),
-    raw_points: slice, vertex_origin: coords,
-  }).select('id,name,source,simplify_tolerance_m,is_exported,created_at,vertex_origin,'
-    + 'track_group_id,segment_order').single();
-  if (error) { statusEl.textContent = `Error: ${error.message}`; return; }
+// ---------------------------------------------------------------------------
+// Bulk photo import (Recordings mode) — match each photo's EXIF timestamp
+// (findExifDateTimeOriginal) to the nearest recorded point time of the active
+// recording, and place it as a project point there. Beyond
+// BULK_PHOTO_MAX_DELTA_MS a photo counts as unmatched rather than guessed and
+// goes to the project's general thread instead. Camera-clock/timezone drift is
+// corrected via the offset input, not by widening the window.
+// ---------------------------------------------------------------------------
+const BULK_PHOTO_MAX_DELTA_MS = 2 * 3600 * 1000; // 2 hours
 
-  currentTracks.push({ ...data, raw_points: slice, coords, geojson: { type: 'LineString', coordinates: coords } });
-  renderTrackList();
-  refreshProjectTracksSource();
-  nameInput.value = '';
-  statusEl.textContent = `Saved "${name}" — pick another chunk, or close when done.`;
+function openBulkPhotoUpload() {
+  const rec = activeRecording();
+  if (!rec?.points) return;
+  bulkPhotoMatches = [];
+  document.getElementById('bulk-photos-title').textContent = `Import photos — ${rec.name}`;
+  document.getElementById('track-bulk-photos-file').value = '';
+  document.getElementById('track-bulk-photos-offset').value = '0';
+  document.getElementById('track-bulk-photos-offset-val').textContent = '0';
+  document.getElementById('track-bulk-photos-preview').innerHTML = '';
+  document.getElementById('track-bulk-photos-message').textContent = '';
+  document.getElementById('track-bulk-photos-upload').disabled = true;
+  document.getElementById('track-bulk-photos-wrap').style.display = 'flex';
+}
+
+function closeBulkPhotoUpload() {
+  document.getElementById('track-bulk-photos-wrap').style.display = 'none';
+  bulkPhotoObjectUrls.forEach(u => URL.revokeObjectURL(u));
+  bulkPhotoObjectUrls = [];
+  bulkPhotoMatches = [];
+}
+
+async function matchBulkPhotos() {
+  const files = [...document.getElementById('track-bulk-photos-file').files];
+  const rec = activeRecording();
+  if (!files.length || !rec?.points) return;
+  const offsetHours = parseFloat(document.getElementById('track-bulk-photos-offset').value) || 0;
+  const msg = document.getElementById('track-bulk-photos-message');
+  msg.textContent = 'Reading photo timestamps…';
+
+  const timed = rec.points.filter(p => p.time != null);
+  bulkPhotoMatches = await Promise.all(files.map(async file => {
+    let point = null, deltaMs = null, exifTime = null;
+    try {
+      const dtStr = findExifDateTimeOriginal(await file.arrayBuffer());
+      if (dtStr) {
+        exifTime = exifDateTimeToMs(dtStr, offsetHours);
+        if (exifTime != null) {
+          let best = null, bestDelta = Infinity;
+          for (const p of timed) {
+            const d = Math.abs(p.time - exifTime);
+            if (d < bestDelta) { bestDelta = d; best = p; }
+          }
+          if (best && bestDelta <= BULK_PHOTO_MAX_DELTA_MS) { point = best; deltaMs = bestDelta; }
+        }
+      }
+    } catch (err) {
+      console.error('EXIF read failed for', file.name, err);
+    }
+    return { file, exifTime, point, deltaMs };
+  }));
+
+  const matchedCount = bulkPhotoMatches.filter(m => m.point).length;
+  msg.textContent = `${matchedCount} of ${files.length} matched to a point; the rest go to the project's general comments.`;
+  renderBulkPhotoPreview();
+  document.getElementById('track-bulk-photos-upload').disabled = false;
+}
+
+function renderBulkPhotoPreview() {
+  bulkPhotoObjectUrls.forEach(u => URL.revokeObjectURL(u));
+  bulkPhotoObjectUrls = [];
+  const wrap = document.getElementById('track-bulk-photos-preview');
+  wrap.innerHTML = bulkPhotoMatches.map(m => {
+    const url = URL.createObjectURL(m.file);
+    bulkPhotoObjectUrls.push(url);
+    const label = m.point
+      ? `<span class="bulk-photo-match matched">matched, ${Math.round(m.deltaMs / 60000)} min from recorded time</span>`
+      : m.exifTime != null
+        ? `<span class="bulk-photo-match unmatched">no nearby recorded time — general comments</span>`
+        : `<span class="bulk-photo-match unmatched">no EXIF time found — general comments</span>`;
+    return `<div class="bulk-photo-item"><img src="${url}"><div class="bulk-photo-info">` +
+      `<div class="bulk-photo-name">${escapeHtml(m.file.name)}</div>${label}</div></div>`;
+  }).join('');
+}
+
+async function uploadMatchedBulkPhotos() {
+  if (!bulkPhotoMatches.length || !currentProject) return;
+  const msg = document.getElementById('track-bulk-photos-message');
+  const uploadBtn = document.getElementById('track-bulk-photos-upload');
+  uploadBtn.disabled = true;
+  let done = 0;
+  for (const m of bulkPhotoMatches) {
+    msg.textContent = `Uploading ${done + 1} of ${bulkPhotoMatches.length}…`;
+    try {
+      let pointId = null;
+      if (m.point) {
+        const { data, error } = await sb.rpc('find_or_create_project_point', {
+          p_project_id: currentProject.id, p_lng: m.point.lng, p_lat: m.point.lat,
+        });
+        if (error) throw error;
+        pointId = data;
+        ensureLocalPoint(pointId, m.point.lng, m.point.lat);
+      }
+      await uploadImageEntry(m.file, pointId, null);
+      done++;
+    } catch (err) {
+      msg.textContent = `Error on "${m.file.name}": ${err.message} — stopped after ${done} upload(s).`;
+      // Drop the ones already uploaded so a retry doesn't duplicate them.
+      bulkPhotoMatches = bulkPhotoMatches.slice(done);
+      renderBulkPhotoPreview();
+      uploadBtn.disabled = false;
+      await refreshHistory();
+      return;
+    }
+  }
+  msg.textContent = `Uploaded ${done} photo(s).`;
+  bulkPhotoMatches = [];
+  document.getElementById('track-bulk-photos-preview').innerHTML = '';
+  await refreshHistory();
 }
 
 // ---------------------------------------------------------------------------
@@ -1304,251 +2059,6 @@ function exportTrailSegmentOSM(track) {
 }
 
 // ---------------------------------------------------------------------------
-// Comments/photos — always read/write through the public RPCs (get_public_track_history
-// works for anyone; add_track_comment is the only anonymous write path in the
-// whole schema), so this code doesn't need separate logged-in/anonymous branches
-// for viewing. Photo upload stays authenticated-only (see the migration).
-//
-// Every track has two kinds of thread, same convention as trails/trail_history:
-// the whole-track thread (location_id null — opened via the editor's "Comments"
-// button) and any number of point threads (a track_locations id — opened by
-// clicking the track itself, an existing point marker, or a bulk-matched photo).
-// get_public_track_history returns everything for a track in one call; which
-// thread is showing is just a client-side filter on location_id, not a
-// separate query, since a track's comment volume is small.
-// ---------------------------------------------------------------------------
-function openTrackComments(track, locationId = null) {
-  commentsTrackId = track.id;
-  commentsLocationId = locationId;
-  document.getElementById('track-comments-title').textContent =
-    (track.name || 'Track') + (locationId ? ' — this point' : '');
-  document.getElementById('track-comment-name').style.display = currentSession ? 'none' : 'block';
-  document.getElementById('track-comment-photo').style.display = currentSession ? 'block' : 'none';
-  document.getElementById('track-comment-text').value = '';
-  document.getElementById('track-comment-message').textContent = '';
-  document.getElementById('track-comments-wrap').style.display = 'flex';
-  refreshTrackComments();
-}
-
-// Resolves (snapping to an existing nearby point if there is one) the location
-// a track click landed on, then opens that point's thread — the "clicking on
-// the track to add a comment/photo there" flow.
-async function openTrackCommentsAtPoint(track, lng, lat) {
-  const { data: locId, error } = await sb.rpc('find_or_create_track_location', {
-    p_track_id: track.id, p_lng: lng, p_lat: lat,
-  });
-  if (error) { alert(`Could not resolve a location: ${error.message}`); return; }
-  ensureLocalLocation(locId, track.id, lng, lat);
-  openTrackComments(track, locId);
-}
-
-function closeTrackComments() {
-  document.getElementById('track-comments-wrap').style.display = 'none';
-  commentsTrackId = null;
-  commentsLocationId = null;
-}
-
-async function refreshTrackComments() {
-  const list = document.getElementById('track-comments-list');
-  const { data, error } = await sb.rpc('get_public_track_history', { p_track_id: commentsTrackId });
-  if (error) { list.innerHTML = '<div class="history-empty">Could not load comments.</div>'; return; }
-  // location_id null == the whole-track bucket; otherwise only this point's own entries.
-  const rows = data.filter(row => (row.location_id || null) === commentsLocationId);
-  if (!rows.length) { list.innerHTML = '<div class="history-empty">No comments yet.</div>'; return; }
-
-  trackHistoryImagePaths.clear();
-  const items = rows.map(row => {
-    const when = new Date(row.created_at).toLocaleString();
-    const who = row.author_name ? escapeHtml(row.author_name) : 'Project member';
-    let body;
-    if (row.entry_type === 'image') {
-      trackHistoryImagePaths.set(row.id, row.value.path);
-      const { data: pub } = sb.storage.from('track-images').getPublicUrl(row.value.path);
-      body = `<img src="${pub.publicUrl}" class="history-thumb">`;
-    } else {
-      body = escapeHtml(row.value.text || '');
-    }
-    // Delete is authenticated-only (moderation by the trusted maintainer group,
-    // same as trails) — an anonymous viewer never sees this button, including
-    // on their own comment; there's no account to prove ownership with. Uses
-    // its own class (not index.html's .history-delete, though it reuses that
-    // rule's styling) and its own click listener below, so it can never be
-    // caught by index.html's trail_history/trail-images delegated handler.
-    const deleteHtml = currentSession
-      ? `<button class="history-delete track-history-delete" data-track-entry-id="${row.id}" title="Delete this entry">✕</button>`
-      : '';
-    return `<li><strong>${who}</strong><br>${body}<br><small>${when}</small>${deleteHtml}</li>`;
-  });
-  list.innerHTML = `<ul class="history-list">${items.join('')}</ul>`;
-}
-
-async function submitTrackComment() {
-  const textEl = document.getElementById('track-comment-text');
-  const text = textEl.value.trim();
-  if (!text || !commentsTrackId) return;
-  const name = document.getElementById('track-comment-name').value.trim();
-  const msg = document.getElementById('track-comment-message');
-  msg.textContent = 'Saving…';
-  const { error } = await sb.rpc('add_track_comment', {
-    p_track_id: commentsTrackId, p_text: text, p_author_name: currentSession ? null : name,
-    p_location_id: commentsLocationId,
-  });
-  if (error) { msg.textContent = `Error: ${error.message}`; return; }
-  textEl.value = '';
-  msg.textContent = '';
-  await refreshTrackComments();
-}
-
-async function uploadTrackCommentPhoto(file) {
-  const msg = document.getElementById('track-comment-message');
-  msg.textContent = 'Uploading…';
-  try {
-    const path = `${commentsTrackId}/${crypto.randomUUID()}-${file.name}`;
-    const { error: upErr } = await sb.storage.from('track-images').upload(path, file);
-    if (upErr) throw upErr;
-    const { error } = await sb.from('track_history').insert({
-      track_id: commentsTrackId, entry_type: 'image', location_id: commentsLocationId,
-      value: { path, content_type: file.type, size_bytes: file.size },
-    });
-    if (error) throw error;
-    msg.textContent = '';
-    await refreshTrackComments();
-  } catch (err) {
-    msg.textContent = `Error: ${err.message}`;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Bulk photo upload — match several photos to points along a FIT-imported
-// track by comparing each photo's EXIF timestamp (findExifDateTimeOriginal,
-// above) to the track's recorded GPS times (raw_points[].time). A manual track
-// has no raw_points/time data, so every photo just attaches to the whole track
-// with no matching attempted. BULK_PHOTO_MAX_DELTA_MS bounds how far a photo's
-// timestamp is allowed to drift from the nearest recorded point before it's
-// treated as unmatched rather than guessed — camera-clock/FIT timezone drift
-// is corrected via the offset input, not by widening this.
-// ---------------------------------------------------------------------------
-const BULK_PHOTO_MAX_DELTA_MS = 2 * 3600 * 1000; // 2 hours
-let bulkPhotoObjectUrls = [];
-
-function openBulkPhotoUpload() {
-  const track = activeTrack();
-  if (!track) return;
-  bulkPhotoTrackId = track.id;
-  bulkPhotoMatches = [];
-  document.getElementById('track-bulk-photos-file').value = '';
-  document.getElementById('track-bulk-photos-offset').value = '0';
-  document.getElementById('track-bulk-photos-offset-val').textContent = '0';
-  document.getElementById('track-bulk-photos-preview').innerHTML = '';
-  document.getElementById('track-bulk-photos-message').textContent = track.raw_points?.some(p => p.time != null)
-    ? '' : 'This track has no recorded GPS times (manual track, or a .gpx without timestamps) — photos will attach to the whole track.';
-  document.getElementById('track-bulk-photos-upload').disabled = true;
-  document.getElementById('track-bulk-photos-wrap').style.display = 'flex';
-}
-
-function closeBulkPhotoUpload() {
-  document.getElementById('track-bulk-photos-wrap').style.display = 'none';
-  bulkPhotoObjectUrls.forEach(u => URL.revokeObjectURL(u));
-  bulkPhotoObjectUrls = [];
-  bulkPhotoTrackId = null;
-  bulkPhotoMatches = [];
-}
-
-async function matchBulkPhotos() {
-  const files = [...document.getElementById('track-bulk-photos-file').files];
-  const track = currentTracks.find(t => t.id === bulkPhotoTrackId);
-  if (!files.length || !track) return;
-  const offsetHours = parseFloat(document.getElementById('track-bulk-photos-offset').value) || 0;
-  const msg = document.getElementById('track-bulk-photos-message');
-  msg.textContent = 'Reading photo timestamps…';
-
-  const rawPoints = track.raw_points || [];
-  bulkPhotoMatches = await Promise.all(files.map(async file => {
-    let point = null, deltaMs = null, exifTime = null;
-    try {
-      const buf = await file.arrayBuffer();
-      const dtStr = findExifDateTimeOriginal(buf);
-      if (dtStr) {
-        exifTime = exifDateTimeToMs(dtStr, offsetHours);
-        if (exifTime != null && rawPoints.length) {
-          let best = null, bestDelta = Infinity;
-          for (const p of rawPoints) {
-            if (p.time == null) continue;
-            const d = Math.abs(p.time - exifTime);
-            if (d < bestDelta) { bestDelta = d; best = p; }
-          }
-          if (best && bestDelta <= BULK_PHOTO_MAX_DELTA_MS) { point = best; deltaMs = bestDelta; }
-        }
-      }
-    } catch (err) {
-      console.error('EXIF read failed for', file.name, err);
-    }
-    return { file, exifTime, point, deltaMs };
-  }));
-
-  const matchedCount = bulkPhotoMatches.filter(m => m.point).length;
-  msg.textContent = `${matchedCount} of ${files.length} matched to a point; the rest will attach to the whole track.`;
-  renderBulkPhotoPreview();
-  document.getElementById('track-bulk-photos-upload').disabled = false;
-}
-
-function renderBulkPhotoPreview() {
-  bulkPhotoObjectUrls.forEach(u => URL.revokeObjectURL(u));
-  bulkPhotoObjectUrls = [];
-  const wrap = document.getElementById('track-bulk-photos-preview');
-  wrap.innerHTML = bulkPhotoMatches.map(m => {
-    const url = URL.createObjectURL(m.file);
-    bulkPhotoObjectUrls.push(url);
-    const label = m.point
-      ? `<span class="bulk-photo-match matched">matched, ${Math.round(m.deltaMs / 60000)} min from recorded time</span>`
-      : m.exifTime != null
-        ? `<span class="bulk-photo-match unmatched">no nearby recorded time — whole track</span>`
-        : `<span class="bulk-photo-match unmatched">no EXIF time found — whole track</span>`;
-    return `<div class="bulk-photo-item"><img src="${url}"><div class="bulk-photo-info">` +
-      `<div class="bulk-photo-name">${escapeHtml(m.file.name)}</div>${label}</div></div>`;
-  }).join('');
-}
-
-async function uploadMatchedBulkPhotos() {
-  if (!bulkPhotoMatches.length || !bulkPhotoTrackId) return;
-  const msg = document.getElementById('track-bulk-photos-message');
-  const uploadBtn = document.getElementById('track-bulk-photos-upload');
-  uploadBtn.disabled = true;
-  let done = 0;
-  for (const m of bulkPhotoMatches) {
-    msg.textContent = `Uploading ${done + 1} of ${bulkPhotoMatches.length}…`;
-    try {
-      let locationId = null;
-      if (m.point) {
-        const { data: locId, error: locErr } = await sb.rpc('find_or_create_track_location', {
-          p_track_id: bulkPhotoTrackId, p_lng: m.point.lng, p_lat: m.point.lat,
-        });
-        if (locErr) throw locErr;
-        locationId = locId;
-        ensureLocalLocation(locationId, bulkPhotoTrackId, m.point.lng, m.point.lat);
-      }
-      const path = `${bulkPhotoTrackId}/${crypto.randomUUID()}-${m.file.name}`;
-      const { error: upErr } = await sb.storage.from('track-images').upload(path, m.file);
-      if (upErr) throw upErr;
-      const { error } = await sb.from('track_history').insert({
-        track_id: bulkPhotoTrackId, entry_type: 'image', location_id: locationId,
-        value: { path, content_type: m.file.type, size_bytes: m.file.size },
-      });
-      if (error) throw error;
-      done++;
-    } catch (err) {
-      msg.textContent = `Error on "${m.file.name}": ${err.message} — stopped after ${done} upload(s).`;
-      uploadBtn.disabled = false;
-      return;
-    }
-  }
-  msg.textContent = `Uploaded ${done} photo(s).`;
-  bulkPhotoMatches = [];
-  document.getElementById('track-bulk-photos-preview').innerHTML = '';
-  if (commentsTrackId === bulkPhotoTrackId) await refreshTrackComments();
-}
-
-// ---------------------------------------------------------------------------
 // View state in the share link — camera position + layer toggles, captured as
 // a snapshot when "Copy share link" is clicked (not kept continuously synced
 // to the address bar, which would mean a history.replaceState on every pan).
@@ -1559,17 +2069,24 @@ async function uploadMatchedBulkPhotos() {
 // treating map/sb/currentSession/escapeHtml/VIEWER_STYLE as the only actual
 // shared surface (see the file header comment).
 // ---------------------------------------------------------------------------
+// Controls that no longer exist are skipped rather than crashing the share
+// button (the OSM lines/areas checkboxes were replaced by the "Map layers"
+// dropdown, which isn't captured here yet).
+const VIEW_TOGGLES = { lines: 'toggle-osm-lines', areas: 'toggle-osm-areas', trail: 'toggle-trail-view', terrain: 'toggle-3d' };
+
 function currentViewParams() {
   const c = map.getCenter();
-  return {
+  const params = {
     lng: c.lng.toFixed(5), lat: c.lat.toFixed(5), z: map.getZoom().toFixed(2),
     b: map.getBearing().toFixed(0), p: map.getPitch().toFixed(0),
-    bg: document.getElementById('bg-select').value,
-    lines: document.getElementById('toggle-osm-lines').checked ? 1 : 0,
-    areas: document.getElementById('toggle-osm-areas').checked ? 1 : 0,
-    trail: document.getElementById('toggle-trail-view').checked ? 1 : 0,
-    terrain: document.getElementById('toggle-3d').checked ? 1 : 0,
   };
+  const bg = document.getElementById('bg-select');
+  if (bg) params.bg = bg.value;
+  for (const [param, id] of Object.entries(VIEW_TOGGLES)) {
+    const el = document.getElementById(id);
+    if (el) params[param] = el.checked ? 1 : 0;
+  }
+  return params;
 }
 
 function hasViewParams(params) {
@@ -1585,21 +2102,17 @@ function applyViewParamsFromURL(params) {
       pitch: parseFloat(params.get('p') || '0'),
     });
   }
-  if (params.has('bg')) {
-    const el = document.getElementById('bg-select');
-    el.value = params.get('bg');
-    el.dispatchEvent(new Event('change'));
+  const bg = document.getElementById('bg-select');
+  if (params.has('bg') && bg) {
+    bg.value = params.get('bg');
+    bg.dispatchEvent(new Event('change'));
   }
-  const applyToggle = (param, id) => {
-    if (!params.has(param)) return;
+  for (const [param, id] of Object.entries(VIEW_TOGGLES)) {
     const el = document.getElementById(id);
+    if (!params.has(param) || !el) continue;
     el.checked = params.get(param) === '1';
     el.dispatchEvent(new Event('change'));
-  };
-  applyToggle('lines', 'toggle-osm-lines');
-  applyToggle('areas', 'toggle-osm-areas');
-  applyToggle('trail', 'toggle-trail-view');
-  applyToggle('terrain', 'toggle-3d');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1608,16 +2121,49 @@ function applyViewParamsFromURL(params) {
 function handleAuthChange(session) {
   document.getElementById('project-new-row').style.display = session ? 'flex' : 'none';
   document.getElementById('projects-picker-hint').style.display = session ? 'none' : 'block';
-  document.getElementById('track-owner-controls').style.display = (session && currentProject) ? 'block' : 'none';
   loadMyProjects();
+  if (!currentProject) return;
+  renderProjectActive();
+  if (!session) {
+    currentRecordings = [];
+    recordingsLoadedFor = null;
+    setMode('review', { force: true });
+  } else if (recordingsLoadedFor !== currentProject.id) {
+    loadRecordings();
+  }
+}
+
+function isTypingTarget(el) {
+  return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+}
+
+function onKeyDown(e) {
+  if (!currentProject || isTypingTarget(e.target)) return;
+  if (manualDrawActive) {
+    if (e.key === 'Escape') { e.preventDefault(); cancelManualDraw(); }
+    else if (e.key === 'Enter') { e.preventDefault(); finishManualDraw(); }
+    return;
+  }
+  if (!edit || currentMode !== 'tracks') return;
+  const k = e.key.toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'y')) {
+    e.preventDefault();
+    if (k === 'y' || e.shiftKey) redoEdit(); else undoEdit();
+  } else if ((e.ctrlKey || e.metaKey) && k === 's') {
+    e.preventDefault();
+    if (isEditDirty()) saveEdit();
+  } else if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (hasSelection()) { e.preventDefault(); removeSelection(); }
+  } else if (e.key === 'Escape') {
+    if (hasSelection()) { e.preventDefault(); clearSelection(); }
+  }
 }
 
 function wireUI() {
-  document.getElementById('project-select').addEventListener('change', e => {
-    if (e.target.value) openProject(e.target.value);
-  });
+  const on = (id, ev, fn) => document.getElementById(id).addEventListener(ev, fn);
 
-  document.getElementById('project-new-create').addEventListener('click', async () => {
+  on('project-select', 'change', e => { if (e.target.value) openProject(e.target.value); });
+  on('project-new-create', 'click', async () => {
     const nameInput = document.getElementById('project-new-name');
     const name = nameInput.value.trim();
     if (!name || !currentSession) return;
@@ -1628,10 +2174,8 @@ function wireUI() {
     document.getElementById('project-select').value = data.id;
     await openProject(data.id);
   });
-
-  document.getElementById('project-close').addEventListener('click', closeProject);
-
-  document.getElementById('project-share-link').addEventListener('click', async () => {
+  on('project-close', 'click', closeProject);
+  on('project-share-link', 'click', async () => {
     const url = new URL(location.href);
     Object.entries(currentViewParams()).forEach(([k, v]) => url.searchParams.set(k, v));
     try {
@@ -1645,152 +2189,74 @@ function wireUI() {
     }
   });
 
-  document.getElementById('track-import-btn').addEventListener('click', () => {
-    document.getElementById('fit-import-wrap').style.display = 'flex';
-    document.getElementById('fit-import-file').value = '';
-    document.getElementById('fit-import-status').textContent = '';
-    document.getElementById('fit-import-profile-wrap').style.display = 'none';
-    fitRecords = null;
-    clearFitImportSources();
-  });
-  document.getElementById('fit-import-close').addEventListener('click', closeFitImport);
-  document.getElementById('fit-import-done').addEventListener('click', closeFitImport);
-  document.getElementById('fit-import-file').addEventListener('change', () => {
-    const file = document.getElementById('fit-import-file').files[0];
-    if (file) handleFitFileChosen(file);
-  });
-  document.getElementById('fit-import-add-chunk').addEventListener('click', addFitChunkAsTrack);
-  initFitProfileDragHandlers();
-
-  document.getElementById('track-manual-btn').addEventListener('click', () => {
-    if (manualDrawActive) finishManualDraw(); else startManualDraw();
+  document.querySelectorAll('#project-mode-tabs button').forEach(b => {
+    b.addEventListener('click', () => setMode(b.dataset.mode));
   });
 
-  document.getElementById('track-editor-name').addEventListener('change', async () => {
-    const track = activeTrack();
-    if (!track) return;
-    const name = document.getElementById('track-editor-name').value.trim();
-    const { error } = await sb.from('tracks').update({ name }).eq('id', track.id);
-    if (error) { setTrackEditorMessage(`Error: ${error.message}`); return; }
-    track.name = name;
-    renderTrackList();
+  // Recordings mode
+  on('recording-upload', 'change', e => {
+    const files = [...e.target.files];
+    e.target.value = '';
+    uploadRecordings(files);
+  });
+  on('recording-name', 'change', renameRecording);
+  on('extract-btn', 'click', extractTrackFromPick);
+  on('recording-bulk-photos-btn', 'click', openBulkPhotoUpload);
+  on('recording-delete-btn', 'click', deleteRecording);
+  on('recording-dock-close', 'click', deselectRecording);
+  initRecordingProfileHandlers();
+
+  // Tracks mode
+  on('track-manual-btn', 'click', () => { if (manualDrawActive) finishManualDraw(); else startManualDraw(); });
+  on('track-editor-name', 'change', renameActiveTrack);
+  on('sel-remove-btn', 'click', removeSelection);
+  on('sel-split-btn', 'click', splitAtSelection);
+  on('sel-clear-btn', 'click', () => clearSelection());
+  on('track-simplify-slider', 'input', e => previewSimplify(parseFloat(e.target.value)));
+  on('track-simplify-apply', 'click', applySimplify);
+  on('track-simplify-reset', 'click', resetToRaw);
+  on('track-undo-btn', 'click', undoEdit);
+  on('track-redo-btn', 'click', redoEdit);
+  on('track-save-btn', 'click', saveEdit);
+  on('track-discard-btn', 'click', discardEdit);
+  on('track-export-gpx-btn', 'click', () => { const t = activeTrack(); if (t) exportTrackGPX(edit ? { ...t, coords: edit.coords } : t); });
+  on('track-export-osm-btn', 'click', () => { const t = activeTrack(); if (t) exportTrailSegmentOSM(edit ? { ...t, coords: edit.coords } : t); });
+  on('track-mark-exported-btn', 'click', toggleExported);
+  on('track-delete-btn', 'click', deleteActiveTrack);
+  on('track-editor-close', 'click', closeTrackEditor);
+  document.addEventListener('keydown', onKeyDown);
+  window.addEventListener('beforeunload', e => {
+    if (isEditDirty()) { e.preventDefault(); e.returnValue = ''; }
   });
 
-  document.getElementById('track-simplify-slider').addEventListener('input', e => {
-    const track = activeTrack();
-    if (!track) return;
-    const tol = parseFloat(e.target.value);
-    document.getElementById('track-simplify-val').textContent = `${tol} m`;
-    setEditLineSource(simplifyLngLat(track.coords, tol));
-  });
-  document.getElementById('track-simplify-apply').addEventListener('click', () => {
-    const track = activeTrack();
-    if (!track) return;
-    const tol = parseFloat(document.getElementById('track-simplify-slider').value);
-    const { coords, origin } = simplifyLngLatWithOrigin(track.coords, track.vertex_origin, tol);
-    saveTrackGeometry(track, coords, tol, origin);
-  });
-  document.getElementById('track-simplify-reset').addEventListener('click', () => {
-    const track = activeTrack();
-    if (!track || !track.raw_points) return;
-    const coords = track.raw_points.map(p => [p.lng, p.lat]);
-    saveTrackGeometry(track, coords, 0, coords);
-  });
-
-  document.getElementById('track-edit-points-btn').addEventListener('click', () => {
-    if (editingPoints) stopEditingPoints(true); else startEditingPoints();
-  });
-
-  document.getElementById('track-mark-exported-btn').addEventListener('click', async () => {
-    const track = activeTrack();
-    if (!track) return;
-    const next = !track.is_exported;
-    const { error } = await sb.from('tracks').update({ is_exported: next }).eq('id', track.id);
-    if (error) { setTrackEditorMessage(`Error: ${error.message}`); return; }
-    track.is_exported = next;
-    document.getElementById('track-mark-exported-btn').textContent = next ? 'Unmark exported' : 'Mark exported';
-    renderTrackList();
-    refreshProjectTracksSource();
-  });
-
-  document.getElementById('track-export-gpx-btn').addEventListener('click', () => {
-    const track = activeTrack();
-    if (track) exportTrackGPX(track);
-  });
-  document.getElementById('track-export-osm-btn').addEventListener('click', () => {
-    const track = activeTrack();
-    if (track) exportTrailSegmentOSM(track);
-  });
-
-  document.getElementById('track-undo-btn').addEventListener('click', undoEdit);
-  document.getElementById('track-redo-btn').addEventListener('click', redoEdit);
-  document.addEventListener('keydown', e => {
-    if (!editingPoints || !(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
-    e.preventDefault();
-    if (e.shiftKey) redoEdit(); else undoEdit();
-  });
-
-  document.getElementById('track-delete-btn').addEventListener('click', async () => {
-    const track = activeTrack();
-    if (!track) return;
-    if (!confirm(`Delete "${track.name || 'this track'}"? This cannot be undone.`)) return;
-    const { error } = await sb.from('tracks').delete().eq('id', track.id);
-    if (error) { alert(`Could not delete: ${error.message}`); return; }
-    currentTracks = currentTracks.filter(t => t.id !== track.id);
-    closeTrackEditor();
-    refreshProjectTracksSource();
-    refreshHiddenOsmIds();
-  });
-
-  document.getElementById('track-editor-close').addEventListener('click', closeTrackEditor);
-
-  document.getElementById('track-comments-btn').addEventListener('click', () => {
-    const track = activeTrack();
-    if (track) openTrackComments(track);
-  });
-  document.getElementById('track-comments-close').addEventListener('click', closeTrackComments);
-  document.getElementById('track-comment-text').addEventListener('keydown', e => {
+  // Review mode + comment threads
+  on('project-comments-btn', 'click', () => openThread({}));
+  on('track-comments-close', 'click', closeThread);
+  on('track-comment-text', 'keydown', e => {
     if (e.key !== 'Enter' || e.ctrlKey) return;
     e.preventDefault();
-    submitTrackComment();
+    submitComment();
   });
-  document.getElementById('track-comment-photo').addEventListener('change', () => {
+  on('track-comment-photo', 'change', () => {
     const input = document.getElementById('track-comment-photo');
     const file = input.files[0];
     input.value = '';
-    if (file && currentSession) uploadTrackCommentPhoto(file);
+    if (file && currentSession && thread) uploadThreadPhoto(file);
   });
-
-  // Delegated on the list container itself (not document) so this can never be
-  // reached by index.html's own trail_history-scoped delegated delete handler,
-  // and vice versa — see the .track-history-delete comment in refreshTrackComments.
-  document.getElementById('track-comments-list').addEventListener('click', async e => {
+  // Delegated on the list container (not document) so this never overlaps with
+  // index.html's own trail_history delegated delete handler.
+  on('track-comments-list', 'click', e => {
     const delBtn = e.target.closest('.track-history-delete');
-    if (!delBtn || !currentSession) return;
-    if (!confirm('Delete this entry? This cannot be undone.')) return;
-    const entryId = delBtn.dataset.trackEntryId;
-    try {
-      const { error } = await sb.from('track_history').delete().eq('id', entryId);
-      if (error) throw error;
-    } catch (err) {
-      alert(`Could not delete: ${err.message}`);
-      return;
-    }
-    const path = trackHistoryImagePaths.get(entryId);
-    if (path) {
-      const { error: rmErr } = await sb.storage.from('track-images').remove([path]);
-      if (rmErr) console.error('Could not remove storage object for deleted entry', rmErr);
-    }
-    await refreshTrackComments();
+    if (delBtn && currentSession) deleteHistoryEntry(delBtn.dataset.entryId);
   });
 
-  document.getElementById('track-bulk-photos-btn').addEventListener('click', openBulkPhotoUpload);
-  document.getElementById('track-bulk-photos-close').addEventListener('click', closeBulkPhotoUpload);
-  document.getElementById('track-bulk-photos-offset').addEventListener('input', e => {
+  // Bulk photo import
+  on('track-bulk-photos-close', 'click', closeBulkPhotoUpload);
+  on('track-bulk-photos-offset', 'input', e => {
     document.getElementById('track-bulk-photos-offset-val').textContent = e.target.value;
   });
-  document.getElementById('track-bulk-photos-match').addEventListener('click', matchBulkPhotos);
-  document.getElementById('track-bulk-photos-upload').addEventListener('click', uploadMatchedBulkPhotos);
+  on('track-bulk-photos-match', 'click', matchBulkPhotos);
+  on('track-bulk-photos-upload', 'click', uploadMatchedBulkPhotos);
 }
 
 function initTracksFeature() {
@@ -1803,10 +2269,12 @@ function initTracksFeature() {
   const initialProjectId = params.get('project');
   const explicitView = hasViewParams(params);
   if (explicitView) applyViewParamsFromURL(params);
-  // A saved view in the link wins over the project's own auto-fit-to-tracks —
-  // otherwise opening a project link would always snap back to "fit everything",
-  // discarding the camera position the link was specifically saved to preserve.
+  // A saved view in the link wins over the project's own auto-fit-to-tracks.
   if (initialProjectId) openProject(initialProjectId, { fitView: !explicitView });
 }
 
-if (map.loaded()) initTracksFeature(); else map.on('load', initTracksFeature);
+// Start once the style is ready, not on map 'load' — 'load' waits for every
+// source's first tiles, so a single source that never finishes (e.g. a local
+// placeholder terrain.pmtiles with no real tiles) would leave the whole
+// project panel unwired.
+if (map.style && map.style._loaded) initTracksFeature(); else map.once('style.load', initTracksFeature);

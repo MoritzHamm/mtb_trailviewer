@@ -135,75 +135,114 @@
       <button id="project-share-link">Copy share link</button>
     </div>
 
-    <div id="track-owner-controls" style="display:none">
-      <div class="project-active-actions">
-        <button id="track-import-btn">Import .fit / .gpx</button>
-        <button id="track-manual-btn">Draw manual track</button>
+    <div id="project-mode-tabs" class="mode-tabs" style="display:none">
+      <button data-mode="recordings" title="Upload .fit/.gpx, import photos, extract tracks">Recordings</button>
+      <button data-mode="tracks" title="Edit track geometry">Tracks</button>
+      <button data-mode="review" title="Comments and photos — what share-link visitors see">Review</button>
+    </div>
+
+    <!-- Recordings mode -->
+    <div id="mode-recordings" class="mode-pane" style="display:none">
+      <label class="file-button">Upload .fit / .gpx
+        <input id="recording-upload" type="file" accept=".fit,.gpx" multiple hidden>
+      </label>
+      <div id="recording-upload-status" class="panel-msg"></div>
+      <ul id="recording-list" class="item-list"></ul>
+
+      <div id="recording-detail" style="display:none">
+        <hr class="sep">
+        <input id="recording-name" class="panel-input" type="text" title="Recording name">
+        <div id="recording-meta" class="panel-meta"></div>
+        <div class="popup-trail-hint">Pick a stretch by dragging the handles on the profile below, or click the map near the recording to move the nearer handle.</div>
+        <input id="extract-name" class="panel-input" type="text" placeholder="Track name (optional)">
+        <div class="track-editor-actions">
+          <button id="extract-btn">Extract as track</button>
+        </div>
+        <div class="track-editor-actions">
+          <button id="recording-bulk-photos-btn">Import photos…</button>
+        </div>
+        <div class="track-editor-actions">
+          <button id="recording-delete-btn" class="danger">Delete recording</button>
+        </div>
+        <div id="recording-message" class="panel-msg"></div>
       </div>
     </div>
 
-    <ul id="track-list"></ul>
+    <!-- Tracks mode -->
+    <div id="mode-tracks" class="mode-pane" style="display:none">
+      <div class="project-active-actions">
+        <button id="track-manual-btn">Draw new track</button>
+      </div>
+      <ul id="track-list-edit" class="item-list"></ul>
 
-    <div id="track-editor-wrap" style="display:none">
-      <hr class="sep">
-      <div class="track-editor-header">
-        <input id="track-editor-name" type="text" title="Track name">
-        <span id="track-editor-source-badge"></span>
-      </div>
+      <div id="track-editor-wrap" style="display:none">
+        <hr class="sep">
+        <div class="track-editor-header">
+          <input id="track-editor-name" type="text" title="Track name">
+          <span id="track-editor-source-badge"></span>
+        </div>
+        <div id="track-point-count" class="panel-meta"></div>
+        <div class="popup-trail-hint">Drag a point to move it · click the line to add a point · click a point to select, shift-click another for a stretch · Del removes, Esc deselects, Ctrl+Z undoes.</div>
 
-      <div class="track-editor-row">
-        <label>Simplify</label>
-        <span class="val" id="track-simplify-val">0 m</span>
-      </div>
-      <input type="range" id="track-simplify-slider" min="0" max="30" step="1" value="0">
-      <div class="track-editor-actions">
-        <button id="track-simplify-apply">Apply</button>
-        <button id="track-simplify-reset">Reset to raw</button>
-      </div>
+        <div id="track-selection-info" class="panel-meta"></div>
+        <div class="track-editor-actions">
+          <button id="sel-remove-btn" title="Delete the selected points (Del) — the neighbours get joined directly; at a track end this trims it">Remove</button>
+          <button id="sel-split-btn" title="Cut the track into separate tracks at the selection's ends">Split</button>
+          <button id="sel-clear-btn" title="Esc">Deselect</button>
+        </div>
 
-      <div class="track-editor-actions">
-        <button id="track-edit-points-btn">Edit points</button>
-        <button id="track-comments-btn">Comments</button>
+        <div class="track-editor-row">
+          <label id="track-simplify-label">Simplify whole track</label>
+          <span class="val" id="track-simplify-val">0 m</span>
+        </div>
+        <input type="range" id="track-simplify-slider" min="0" max="30" step="0.5" value="0">
+        <div class="track-editor-actions">
+          <button id="track-simplify-apply" disabled>Apply</button>
+          <button id="track-simplify-reset" title="Replace the geometry with the original recorded points (undoable)">Reset to raw</button>
+        </div>
+
+        <div class="track-editor-actions">
+          <button id="track-undo-btn" disabled>Undo</button>
+          <button id="track-redo-btn" disabled>Redo</button>
+        </div>
+        <div class="track-editor-actions">
+          <button id="track-save-btn" class="primary" disabled title="Ctrl+S">Save</button>
+          <button id="track-discard-btn" disabled>Discard</button>
+        </div>
+
+        <hr class="sep">
+        <div class="track-editor-actions">
+          <button id="track-export-gpx-btn">Export GPX</button>
+          <button id="track-export-osm-btn">Export OSM</button>
+        </div>
+        <div class="track-editor-actions">
+          <button id="track-mark-exported-btn">Mark exported</button>
+        </div>
+        <div class="track-editor-actions">
+          <button id="track-delete-btn" class="danger">Delete track</button>
+          <button id="track-editor-close">Close</button>
+        </div>
+        <div id="track-editor-message"></div>
       </div>
-      <div class="track-editor-actions" title="Undo/redo point edits (Ctrl+Z / Ctrl+Shift+Z) — resets on save or close">
-        <button id="track-undo-btn" disabled>Undo</button>
-        <button id="track-redo-btn" disabled>Redo</button>
+    </div>
+
+    <!-- Review mode -->
+    <div id="mode-review" class="mode-pane" style="display:none">
+      <div class="popup-trail-hint">Click a track to comment on that spot, or an orange marker to see what's been said there.</div>
+      <div class="project-active-actions">
+        <button id="project-comments-btn">Project comments</button>
       </div>
-      <div class="track-editor-actions">
-        <button id="track-bulk-photos-btn">Bulk upload photos</button>
-        <button id="track-export-gpx-btn">Export GPX</button>
-        <button id="track-export-osm-btn">Export OSM</button>
-      </div>
-      <div class="track-editor-actions">
-        <button id="track-mark-exported-btn">Mark exported</button>
-      </div>
-      <div class="track-editor-actions">
-        <button id="track-delete-btn" class="danger">Delete track</button>
-        <button id="track-editor-close">Close</button>
-      </div>
-      <div id="track-editor-message"></div>
+      <ul id="track-list-review" class="item-list"></ul>
     </div>
   </div>
 </div>
 
-<div id="fit-import-wrap" style="display:none">
-  <div id="fit-import-panel">
-    <div class="entry-form-header">
-      <h3>Import .fit / .gpx</h3>
-      <button id="fit-import-close" aria-label="Close" title="Close">✕</button>
-    </div>
-    <input id="fit-import-file" type="file" accept=".fit,.gpx">
-    <div id="fit-import-status"></div>
-    <div id="fit-import-profile-wrap" style="display:none">
-      <canvas id="fit-profile-canvas" width="440" height="120"></canvas>
-      <div class="popup-trail-hint">Drag the two handles to pick a chunk — the highlighted stretch on the map is what gets saved.</div>
-      <input id="fit-import-chunk-name" type="text" placeholder="Name for this chunk (optional)">
-      <div class="track-editor-actions">
-        <button id="fit-import-add-chunk">Add chunk as track</button>
-        <button id="fit-import-done">Done importing</button>
-      </div>
-    </div>
+<div id="recording-dock" style="display:none">
+  <div class="recording-dock-header">
+    <span id="recording-dock-info"></span>
+    <button id="recording-dock-close" aria-label="Close" title="Deselect recording">✕</button>
   </div>
+  <canvas id="recording-profile-canvas"></canvas>
 </div>
 
 <div id="track-comments-wrap" style="display:none">
@@ -225,10 +264,10 @@
 <div id="track-bulk-photos-wrap" style="display:none">
   <div id="track-bulk-photos-panel">
     <div class="entry-form-header">
-      <h3>Bulk upload photos</h3>
+      <h3 id="bulk-photos-title">Import photos</h3>
       <button id="track-bulk-photos-close" aria-label="Close" title="Close">✕</button>
     </div>
-    <div class="popup-trail-hint">Photos are matched to a point on the track by comparing each photo's EXIF timestamp to the recorded GPS time — only works for tracks imported from a .fit file (or a .gpx with timestamps). Unmatched photos (no EXIF time, or too far from any recorded time) attach to the track as a whole instead.</div>
+    <div class="popup-trail-hint">Each photo is placed on the map where the recording was at the photo's EXIF time. Unmatched photos (no EXIF time, or more than 2 h from any recorded time) go to the project's general comments instead.</div>
     <input id="track-bulk-photos-file" type="file" accept="image/*" multiple>
     <div class="track-editor-row">
       <label for="track-bulk-photos-offset">Camera clock offset from UTC (hours)</label>
@@ -347,30 +386,7 @@ const GLYPHS_BASE  = IS_LOCAL ? 'http://localhost:8080/fonts' : '/fonts';
 // Register PMTiles protocol so MapLibre can read .pmtiles files directly
 const pmtilesProtocol = new pmtiles.Protocol();
 
-// Temporary diagnostics for the intermittent "incorrect header check" /
-// aborted-request crash — logging (not breakpoints) on purpose: this looks
-// like a race condition, and pausing execution to inspect it can change the
-// very timing that causes it. Gives a real in-flight-request timeline instead
-// of a single library-internal stack trace with no request context. Remove
-// once the bug's actually found — this isn't meant to stay.
-let __reqSeq = 0;
-function logTileRequest(label, url) {
-  const id = ++__reqSeq;
-  const t0 = performance.now();
-  console.log(`[tile ${id}] ${label} start  ${url}  t=${t0.toFixed(1)}`);
-  return (ok, extra) => {
-    console.log(`[tile ${id}] ${label} ${ok ? 'ok' : 'FAIL'}  ${url}  `
-      + `+${(performance.now() - t0).toFixed(1)}ms${extra ? '  ' + extra : ''}`);
-  };
-}
-window.addEventListener('error', e => {
-  console.log(`[GLOBAL ERROR] ${e.message}  @ t=${performance.now().toFixed(1)}`, e.error);
-});
-window.addEventListener('unhandledrejection', e => {
-  console.log(`[UNHANDLED REJECTION] @ t=${performance.now().toFixed(1)}`, e.reason);
-});
-
-// Diagnosis (from a captured request-timeline log): every failure was a
+// Diagnosis (from a since-removed request-timeline log): every failure was a
 // dalarna.pmtiles Z16 tile — that archive's tippecanoe max-zoom, so the
 // densest/slowest tiles to fetch+decompress — getting genuinely cancelled by
 // MapLibre mid-flight during fast panning (completely normal: the tile just
@@ -386,13 +402,9 @@ window.addEventListener('unhandledrejection', e => {
 // else still propagates normally.
 const rawPmtilesTile = pmtilesProtocol.tile.bind(pmtilesProtocol);
 maplibregl.addProtocol('pmtiles', async (params, ...rest) => {
-  const done = logTileRequest('pmtiles', params.url);
   try {
-    const result = await rawPmtilesTile(params, ...rest);
-    done(true, `bytes=${result && result.data ? result.data.byteLength : 'n/a'}`);
-    return result;
+    return await rawPmtilesTile(params, ...rest);
   } catch (err) {
-    done(false, String(err));
     if (err && err.name === 'AbortError') return { data: new ArrayBuffer(0) };
     throw err;
   }
@@ -432,12 +444,10 @@ function slopeColor(deg) {
 // and colors it per VIEWER_STYLE.slope.stops (see style-config.js)
 // ---------------------------------------------------------------------------
 maplibregl.addProtocol('slope', async (params) => {
-  const done = logTileRequest('slope(terrainTiles)', params.url);
   try {
     const [z, x, y] = params.url.replace('slope://', '').split('/').map(Number);
     const tile = await terrainTiles.getZxy(z, x, y);
     if (!tile) throw new Error('not found');
-    done(true);
     // Decode with UPNG (not canvas) — see the wetness/vegheight protocol
     // below for why canvas-based decoding is unsafe for these tiles.
     const S = 256;
@@ -475,7 +485,6 @@ maplibregl.addProtocol('slope', async (params) => {
     const blob = await dstCanvas.convertToBlob({ type: 'image/png' });
     return { data: await blob.arrayBuffer() };
   } catch (err) {
-    done(false, String(err));
     return { data: new ArrayBuffer(0) };
   }
 });
@@ -519,11 +528,9 @@ function makeGrayscaleProtocol(tileset, colorLow, colorHigh, label) {
   const cache = new Map(); // "z/x/y" -> Promise<ArrayBuffer> (recolored PNG bytes)
 
   async function loadAndRecolor(z, x, y) {
-    const done = logTileRequest(label, `${z}/${x}/${y}`);
     try {
       const tile = await tileset.getZxy(z, x, y);
       if (!tile) throw new Error('not found');
-      done(true);
       const S = 256;
       const bitmap = await createImageBitmap(new Blob([tile.data], { type: 'image/webp' }));
       const srcCanvas = new OffscreenCanvas(S, S);
@@ -544,7 +551,6 @@ function makeGrayscaleProtocol(tileset, colorLow, colorHigh, label) {
       const blob = await dstCanvas.convertToBlob({ type: 'image/png' });
       return await blob.arrayBuffer();
     } catch (err) {
-      done(false, String(err));
       return new ArrayBuffer(0);
     }
   }
@@ -1285,9 +1291,7 @@ async function sampleElevation(lng, lat) {
     elevTileCache = {
       key,
       promise: (async () => {
-        const done = logTileRequest('elevation(terrainTiles)', `${ELEVATION_ZOOM}/${tx}/${ty}`);
         const tile = await terrainTiles.getZxy(ELEVATION_ZOOM, tx, ty);
-        done(!!tile);
         if (!tile) return null;
         return new Uint8Array(UPNG.toRGBA8(UPNG.decode(tile.data))[0]);
       })(),
@@ -1493,6 +1497,12 @@ toggleTrailView.addEventListener('change', e => {
 
 let featurePopup = null;
 map.on('click', e => {
+  // tracks.js (loaded after this script) claims clicks on project tracks/points
+  // and while a project editing mode is using the map — no OSM popup then.
+  if (window.tracksWantsMapClick && window.tracksWantsMapClick(e)) {
+    if (featurePopup) { featurePopup.remove(); featurePopup = null; }
+    return;
+  }
   const layers = CLICKABLE_LINE_LAYERS.filter(id => map.getLayer(id));
   const bbox = [
     [e.point.x - CLICK_HIT_TOLERANCE, e.point.y - CLICK_HIT_TOLERANCE],

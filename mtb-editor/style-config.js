@@ -146,15 +146,18 @@ const VIEWER_STYLE = {
   // trails, so it's styled distinctly too: dashed lines (nothing here is "real"
   // yet) in colors that don't collide with trailStatus/osm.path's mtb:scale ramp.
   tracks: {
-    rawImport:  { color: '#9aa5b1', width: 2, opacity: 0.55, dasharray: [1, 1] },   // faint, whole uploaded ride
-    chunkPick:  { color: '#ffe14d', width: 4, opacity: 0.9 },                       // subsection currently being selected
+    rawImport:  { color: '#9aa5b1', width: 2, opacity: 0.55, dasharray: [1, 1] },   // faint, whole active recording
+    chunkPick:  { color: '#ffe14d', width: 4, opacity: 0.9 },                       // stretch picked for extraction
     manual:     { color: '#5ba4cf', width: 3, opacity: 0.9, dasharray: [2, 1] },
-    proposed:   { color: '#c77dff', width: 3, opacity: 0.9, dasharray: [2, 1] },    // saved fit_upload chunk, not yet exported
+    proposed:   { color: '#c77dff', width: 3, opacity: 0.9, dasharray: [2, 1] },    // recording/OSM-sourced track, not yet exported
     exported:   { color: '#4caf50', width: 3, opacity: 0.9, dasharray: [2, 1] },    // marked is_exported
-    vertex:     { color: '#fff700', radius: 5, strokeColor: '#1a1a1a', strokeWidth: 1.5 },
-    // Comment/photo markers at a specific point along a track (track_locations) —
-    // one neutral color regardless of entry type, unlike trailStatus's markers,
-    // since tracks have no status concept to color by.
+    // Tracks-mode editor: the working line, its vertices (a circle layer — raw
+    // recordings can have thousands, so kept small), and the selected stretch.
+    editLine:   { color: '#ffe14d', width: 3, opacity: 0.9 },
+    vertex:     { color: '#fff700', radius: 4, strokeColor: '#1a1a1a', strokeWidth: 1.5 },
+    vertexSelected: { color: '#ff4d6d', radius: 6 },
+    // Comment/photo markers (project_points) — one neutral color regardless of
+    // entry type, unlike trailStatus's markers, since there's no status to color by.
     locationPoint: { color: '#ffb74d', radius: 6, strokeColor: '#1a1a1a', strokeWidth: 1.5 },
   },
 };

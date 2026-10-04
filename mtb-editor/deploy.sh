@@ -65,6 +65,13 @@ rclone copyto "$MTB_DIR/tiles/dalarna.pmtiles"  "$DEST/tiles/dalarna.pmtiles"  "
 if [ "$SKIP_TERRAIN" = false ]; then
   log "Uploading terrain.pmtiles (large, background-worthy)"
   TERRAIN_REAL="$(readlink -f "$MTB_DIR/tiles/terrain.pmtiles")"
+  # Refuse to overwrite the real (~53GB) archive on R2 with a local placeholder —
+  # a worktree can have a tiny stand-in terrain.pmtiles just so serve.py doesn't 404.
+  TERRAIN_BYTES="$(stat -c %s "$TERRAIN_REAL")"
+  if [ "$TERRAIN_BYTES" -lt 1000000000 ]; then
+    log "ERROR: $TERRAIN_REAL is only $TERRAIN_BYTES bytes — looks like a placeholder, not the real archive. Use --skip-terrain."
+    exit 1
+  fi
   rclone copyto "$TERRAIN_REAL" "$DEST/tiles/terrain.pmtiles" "${RCLONE_BIG[@]}"
 else
   log "Skipping terrain.pmtiles (--skip-terrain)"

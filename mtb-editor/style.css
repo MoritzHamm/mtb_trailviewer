@@ -388,19 +388,57 @@ select:focus { border-color: #5ba4cf; }
   padding: 5px 8px; font-size: 12px; cursor: pointer; flex: 1;
 }
 .project-active-actions button:hover, .track-editor-actions button:hover { background: #3a5a70; }
+.project-active-actions button:disabled, .track-editor-actions button:disabled { opacity: 0.45; cursor: default; }
+.project-active-actions button:disabled:hover, .track-editor-actions button:disabled:hover { background: #2a4a5f; }
+.track-editor-actions { display: flex; gap: 6px; margin-top: 6px; }
+.track-editor-actions button.primary { background: #2f6b3a; border-color: #4caf50; }
+.track-editor-actions button.primary:hover:not(:disabled) { background: #3a7f47; }
 .track-editor-actions button.danger { background: #5a2a2a; border-color: #8f3a3a; }
 .track-editor-actions button.danger:hover { background: #703a3a; }
 
-#track-list { list-style: none; margin-top: 4px; }
-#track-list li {
+/* Mode tabs (Recordings / Tracks / Review) */
+.mode-tabs { display: flex; margin: 2px 0 12px; border: 1px solid #3a6a8f; border-radius: 5px; overflow: hidden; }
+.mode-tabs button {
+  flex: 1; background: transparent; color: #bbb; border: none; padding: 6px 4px;
+  font-size: 12px; cursor: pointer;
+}
+.mode-tabs button + button { border-left: 1px solid #3a6a8f; }
+.mode-tabs button:hover { background: #232f38; color: #e8e8e8; }
+.mode-tabs button.active { background: #2a4a5f; color: #fff; font-weight: 600; }
+
+.item-list { list-style: none; margin-top: 4px; }
+.item-list li {
   padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;
   display: flex; align-items: center; justify-content: space-between; gap: 6px;
 }
-#track-list li:hover { background: #232323; }
-#track-list li.active { background: #1e3a52; }
-#track-list .track-badge {
+.item-list li:hover { background: #232323; }
+.item-list li.active { background: #1e3a52; }
+.item-list li.item-list-empty { color: #777; cursor: default; }
+.item-list li.item-list-empty:hover { background: none; }
+.item-list .item-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.item-list .item-name small { display: block; color: #888; font-size: 10px; }
+.item-list .track-badge {
   font-size: 10px; padding: 1px 5px; border-radius: 3px; color: #111; white-space: nowrap;
 }
+.item-list .track-badge.neutral { background: #555; color: #ddd; }
+.item-comments-btn {
+  background: none; border: 1px solid #444; border-radius: 3px; color: #ccc;
+  font-size: 11px; padding: 1px 5px; cursor: pointer; white-space: nowrap;
+}
+.item-comments-btn:hover { border-color: #3a6a8f; color: #fff; }
+
+.file-button {
+  display: block; text-align: center; background: #2a4a5f; color: #e8e8e8;
+  border: 1px solid #3a6a8f; border-radius: 4px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+}
+.file-button:hover { background: #3a5a70; }
+.panel-input {
+  display: block; width: 100%; margin: 6px 0;
+  background: #2a2a2a; color: #e8e8e8; border: 1px solid #444; border-radius: 4px;
+  padding: 5px 8px; font-size: 12px;
+}
+.panel-meta { font-size: 11px; color: #999; margin: 4px 0; }
+.panel-msg { font-size: 11px; color: #888; min-height: 14px; margin-top: 4px; }
 
 .track-editor-header { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
 #track-editor-name {
@@ -413,31 +451,23 @@ select:focus { border-color: #5ba4cf; }
 .track-editor-row .val { color: #fff; font-variant-numeric: tabular-nums; }
 #track-editor-message { font-size: 11px; color: #888; min-height: 14px; margin-top: 4px; }
 
-/* ---- FIT import modal ---- */
-#fit-import-wrap {
-  position: absolute; inset: 0;
-  background: rgba(0, 0, 0, 0.45);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 55;
-}
-#fit-import-panel {
-  background: rgba(20, 20, 20, 0.95);
+/* ---- recording elevation profile dock (tracks.js, Recordings mode) ---- */
+#recording-dock {
+  position: absolute;
+  left: 288px; right: 12px; bottom: 40px;
+  background: rgba(20, 20, 20, 0.9);
+  backdrop-filter: blur(6px);
   border-radius: 8px;
-  padding: 18px 20px;
-  width: 480px;
-  max-width: 92vw;
-  color: #e8e8e8;
-  box-shadow: 0 4px 24px rgba(0,0,0,.6);
+  padding: 8px 10px 10px;
+  box-shadow: 0 2px 12px rgba(0,0,0,.5);
+  z-index: 6;
 }
-#fit-import-panel input[type=file],
-#fit-import-panel input[type=text] {
-  display: block; width: 100%; margin: 8px 0;
-  background: #2a2a2a; color: #e8e8e8; border: 1px solid #444; border-radius: 4px;
-  padding: 6px 8px; font-size: 13px;
-}
-#fit-import-status { font-size: 11px; color: #888; min-height: 14px; }
-#fit-profile-canvas {
-  display: block; width: 100%; height: 120px; margin-top: 8px;
+.recording-dock-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+#recording-dock-info { font-size: 12px; color: #ddd; font-variant-numeric: tabular-nums; }
+#recording-dock-close { background: none; border: none; color: #999; font-size: 14px; cursor: pointer; }
+#recording-dock-close:hover { color: #ccc; }
+#recording-profile-canvas {
+  display: block; width: 100%; height: 110px;
   border-radius: 4px; border: 1px solid #333; background: #161616; cursor: ew-resize;
 }
 
@@ -468,7 +498,7 @@ select:focus { border-color: #5ba4cf; }
 #track-comments-panel textarea { resize: vertical; min-height: 60px; }
 #track-comment-message { font-size: 11px; color: #888; min-height: 14px; }
 
-/* ---- bulk photo upload modal (mirrors #fit-import-wrap) ---- */
+/* ---- bulk photo import modal ---- */
 #track-bulk-photos-wrap {
   position: absolute; inset: 0;
   background: rgba(0, 0, 0, 0.45);
@@ -511,14 +541,6 @@ select:focus { border-color: #5ba4cf; }
 .bulk-photo-item .bulk-photo-match { color: #888; }
 .bulk-photo-item .bulk-photo-match.matched { color: #4caf50; }
 .bulk-photo-item .bulk-photo-match.unmatched { color: #e0b400; }
-
-/* ---- track vertex markers (tracks.js, edit-points/manual-draw modes) ---- */
-.track-vertex-handle {
-  width: 12px; height: 12px; border-radius: 50%;
-  background: #ffe14d; border: 2px solid #1a1a1a;
-  cursor: grab; box-shadow: 0 1px 4px rgba(0,0,0,.6);
-}
-.track-vertex-handle:active { cursor: grabbing; }
 
 /* ---- sun compass ---- */
 #compass-wrap {
