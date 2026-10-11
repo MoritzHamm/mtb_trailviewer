@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contours preview</title>
+<!-- Standalone preview of foundation/contours.py output (tiles/contours_falun_s{3,6,12}.pmtiles, one per --sigma).
+     Local dev only — not linked from index.html, not part of deploy.sh. -->
+<link href="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.4.0/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/pmtiles@4.5.0/dist/pmtiles.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #1a1a1a; }
+  #map { position: absolute; inset: 0; }
+  #panel {
+    position: absolute; top: 12px; left: 12px; z-index: 2;
+    background: rgba(20,20,20,.88); color: #e8e8e8; border-radius: 8px;
+    padding: 12px 14px; font-size: 13px; box-shadow: 0 2px 12px rgba(0,0,0,.5); width: 250px;
+  }
+  #panel h3 { font-size: 14px; margin-bottom: 8px; }
+  #panel label { display: flex; align-items: center; gap: 6px; margin: 4px 0; cursor: pointer; }
+  #panel select { width: 100%; margin: 6px 0; background: #2a2a2a; color: #e8e8e8; border: 1px solid #444; border-radius: 4px; padding: 4px; }
+  #panel .hint { color: #999; font-size: 11px; margin-top: 8px; }
+  .tier-head { color: #999; font-size: 11px; margin-top: 4px; }
+  .tier { display: grid; grid-template-columns: 62px 1fr 34px; align-items: center; gap: 4px; }
+  .tier input[type=range] { width: 100%; }
+  .tier .val { color: #fff; font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; }
+  #readout { margin-top: 8px; font-variant-numeric: tabular-nums; min-height: 16px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <h3>Contours (5 m)</h3>
+  <select id="variant" title="Pre-smoothing strength (Gaussian sigma)">
+    <option value="s3">σ 3 m — approved baseline</option>
+    <option value="s6">σ 6 m — smoother</option>
+    <option value="s12">σ 12 m — stylised</option>
+  </select>
+  <label title="Draw the σ 3 baseline faintly underneath the selected version"><input type="checkbox" id="ghost"> σ 3 baseline underneath</label>
+  <div class="tier-head">Line tier · shown from zoom</div>
+  <div class="tier"><label><input type="checkbox" data-level="100" checked> 100 m</label>
+    <input type="range" data-minzoom="100" min="8" max="16" step="0.5" value="10"><span class="val" data-val="100"></span></div>
+  <div class="tier"><label><input type="checkbox" data-level="25" checked> 25 m</label>
+    <input type="range" data-minzoom="25" min="8" max="16" step="0.5" value="10"><span class="val" data-val="25"></span></div>
+  <div class="tier"><label><input type="checkbox" data-level="5" checked> 5 m</label>
+    <input type="range" data-minzoom="5" min="8" max="16" step="0.5" value="12"><span class="val" data-val="5"></span></div>
+  <select id="bg">
+    <option value="osm">OpenStreetMap</option>
+    <option value="satellite">Satellite (Esri)</option>
+    <option value="none">No background</option>
+  </select>
+  <div id="readout"></div>
+  <div class="hint">Falun 20×20 km only. The tiles hold every line from z10 up; below z10 there's no data. The sliders thin lines out in the map style only.</div>
+</div>
+<script>
+const protocol = new pmtiles.Protocol();
+maplibregl.addProtocol('pmtiles', protocol.tile);
+
+const map = new maplibregl.Map({
+  container: 'map',
+  center: [15.571, 60.626], zoom: 14.5,   // Lövberget
+  style: {
+    version: 8,
+    sources: {
+      osm: { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, maxzoom: 19,
+             attribution: '© OpenStreetMap contributors' },
+      satellite: { type: 'raster', tileSize: 256, maxzoom: 19, attribution: '© Esri',
+             tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'] },
+    },
+    layers: [
+      { id: 'bg', type: 'background', paint: { 'background-color': '#f4efe6' } },
+      { id: 'osm', type: 'raster', source: 'osm', paint: { 'raster-opacity': 0.55, 'raster-saturation': -0.6 } },
+      { id: 'satellite', type: 'raster', source: 'satellite', layout: { visibility: 'none' }, paint: { 'raster-opacity': 0.8 } },
+    ],
+    glyphs: `${location.origin}/fonts/{fontstack}/{range}.pbf`,
+  },
+});
+// Per smoothing variant (foundation/contours.py --sigma): one source, one line
+// layer per tier (100/25/5 m) so each tier can get its own minzoom from the
+// sliders, plus a label layer. 'ghost-*' is the σ 3 baseline drawn faintly
+// underneath for comparison. The tiles carry every line at every zoom (built with
+// --tiers 100:10,25:10,5:10), so all thinning happens here in the style.
+const VARIANTS = ['s3', 's6', 's12'];
+const LEVELS = [100, 25, 5];
+const COLOR = '#8a4b14';
+const WIDTH = ['interpolate', ['linear'], ['zoom'],   // zoom must be the outermost expression
+  10, ['match', ['get', 'level'], 100, 0.8, 25, 0.5, 0.3],
+  14, ['match', ['get', 'level'], 100, 1.8, 25, 1.1, 0.4],
+  17, ['match', ['get', 'level'], 100, 2.6, 25, 1.8, 1.0]];
+const lineId = (v, lv) => `lines-${v}-${lv}`;
+
+map.on('load', () => {
+  for (const v of VARIANTS) {
+    map.addSource(`contours-${v}`, { type: 'vector', url: `pmtiles://${location.origin}/tiles/contours_falun_${v}.pmtiles`,
+      attribution: '© Lantmäteriet LiDAR' });
+  }
+  for (const lv of LEVELS) {
+    map.addLayer({ id: `ghost-${lv}`, type: 'line', source: 'contours-s3', 'source-layer': 'contours',
+      filter: ['==', ['get', 'level'], lv],
+      layout: { visibility: 'none', 'line-join': 'round' },
+      paint: { 'line-color': '#2b6cb0', 'line-width': WIDTH, 'line-opacity': 0.45 } });
+  }
+  for (const v of VARIANTS) {
+    for (const lv of LEVELS) {
+      map.addLayer({ id: lineId(v, lv), type: 'line', source: `contours-${v}`, 'source-layer': 'contours',
+        filter: ['==', ['get', 'level'], lv],
+        layout: { visibility: 'none', 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': COLOR, 'line-width': WIDTH, 'line-opacity': 0.9 } });
+    }
+    map.addLayer({ id: `labels-${v}`, type: 'symbol', source: `contours-${v}`, 'source-layer': 'contours',
+      filter: ['in', ['get', 'level'], ['literal', [25, 100]]], minzoom: 14,
+      layout: { visibility: 'none', 'symbol-placement': 'line', 'text-field': ['to-string', ['get', 'ele']],
+                'text-size': 10, 'symbol-spacing': 400, 'text-font': ['Open Sans Regular'] },
+      paint: { 'text-color': COLOR, 'text-halo-color': '#f4efe6', 'text-halo-width': 1.5 } });
+  }
+  refresh();
+});
+
+function currentVariant() { return document.getElementById('variant').value; }
+const tierOn = lv => document.querySelector(`[data-level="${lv}"]`).checked;
+const tierMinzoom = lv => parseFloat(document.querySelector(`[data-minzoom="${lv}"]`).value);
+
+function refresh() {
+  for (const lv of LEVELS) document.querySelector(`[data-val="${lv}"]`).textContent = `z${tierMinzoom(lv)}`;
+  if (!map.getLayer('ghost-100')) return;   // before 'load' added the layers
+  const cur = currentVariant();
+  const ghost = document.getElementById('ghost').checked && cur !== 's3';
+  for (const lv of LEVELS) {
+    const mz = tierMinzoom(lv);
+    for (const v of VARIANTS) {
+      map.setLayoutProperty(lineId(v, lv), 'visibility', v === cur && tierOn(lv) ? 'visible' : 'none');
+      map.setLayerZoomRange(lineId(v, lv), mz, 24);
+    }
+    map.setLayoutProperty(`ghost-${lv}`, 'visibility', ghost && tierOn(lv) ? 'visible' : 'none');
+    map.setLayerZoomRange(`ghost-${lv}`, mz, 24);
+  }
+  for (const v of VARIANTS) map.setLayoutProperty(`labels-${v}`, 'visibility', v === cur ? 'visible' : 'none');
+}
+document.querySelectorAll('#variant, #ghost, [data-level], [data-minzoom]').forEach(el =>
+  el.addEventListener(el.type === 'range' ? 'input' : 'change', refresh));
+refresh();
+
+map.addControl(new maplibregl.NavigationControl());
+map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }));
+
+document.getElementById('bg').addEventListener('change', e => {
+  map.setLayoutProperty('osm', 'visibility', e.target.value === 'osm' ? 'visible' : 'none');
+  map.setLayoutProperty('satellite', 'visibility', e.target.value === 'satellite' ? 'visible' : 'none');
+});
+
+const readout = document.getElementById('readout');
+map.on('mousemove', e => {
+  if (!map.getLayer('ghost-100')) return;
+  const f = map.queryRenderedFeatures([[e.point.x - 4, e.point.y - 4], [e.point.x + 4, e.point.y + 4]], { layers: LEVELS.map(lv => lineId(currentVariant(), lv)) })[0];
+  readout.textContent = `z${map.getZoom().toFixed(1)}` + (f ? ` · ${f.properties.ele} m` : '');
+  map.getCanvas().style.cursor = f ? 'crosshair' : '';
+});
+</script>
+</body>
+</html>

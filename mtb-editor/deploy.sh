@@ -12,8 +12,8 @@
 # bucket-scoped R2 API token.
 #
 # Usage:
-#   bash deploy.sh                        # static assets + dalarna + terrain
-#   bash deploy.sh --skip-terrain         # static assets + dalarna only
+#   bash deploy.sh                        # static assets + dalarna + contours + terrain
+#   bash deploy.sh --skip-terrain         # static assets + dalarna + contours
 #   bash deploy.sh --with-overlay         # also upload vegheight/wetness.pmtiles
 #   bash deploy.sh --remote=X --bucket=Y  # override rclone remote/bucket name
 #
@@ -61,6 +61,20 @@ done
 log "Uploading coverage.geojson + dalarna.pmtiles"
 rclone copyto "$MTB_DIR/tiles/coverage.geojson" "$DEST/tiles/coverage.geojson" "${RCLONE_COMMON[@]}"
 rclone copyto "$MTB_DIR/tiles/dalarna.pmtiles"  "$DEST/tiles/dalarna.pmtiles"  "${RCLONE_COMMON[@]}" --progress -v
+
+# Contour lines (foundation/contours.py, full Dalarna, ~1GB). Optional: skipped
+# with a note if this checkout doesn't have it, rather than failing the deploy.
+if [ -f "$MTB_DIR/tiles/contours.pmtiles" ]; then
+  CONTOURS_REAL="$(readlink -f "$MTB_DIR/tiles/contours.pmtiles")"
+  if [ "$(stat -c %s "$CONTOURS_REAL")" -lt 100000000 ]; then
+    log "ERROR: $CONTOURS_REAL is under 100MB — not the full-Dalarna contours. Not uploading."
+    exit 1
+  fi
+  log "Uploading contours.pmtiles"
+  rclone copyto "$CONTOURS_REAL" "$DEST/tiles/contours.pmtiles" "${RCLONE_BIG[@]}"
+else
+  log "No tiles/contours.pmtiles here — skipping (the viewer's contour layer will be empty)"
+fi
 
 if [ "$SKIP_TERRAIN" = false ]; then
   log "Uploading terrain.pmtiles (large, background-worthy)"

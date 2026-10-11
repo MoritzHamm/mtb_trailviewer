@@ -600,6 +600,7 @@ const DEFAULTS = {
   // categories default on, former areas-ish (fills) default off.
   osmCat_tracks: true, osmCat_waterways: true, osmCat_otherLines: true,
   osmCat_vegetation: false, osmCat_water: false, osmCat_others: true,
+  osmCat_contours: false,
   viewLng: CENTER_LNG, viewLat: CENTER_LAT, viewZoom: START_ZOOM,
   viewBearing: 0, viewPitch: 0,
 };
@@ -612,6 +613,33 @@ function loadSetting(key) {
     const v = localStorage.getItem('tv_' + key);
     return v !== null ? JSON.parse(v) : DEFAULTS[key];
   } catch(e) { return DEFAULTS[key]; }
+}
+
+// Contour lines (tiles/contours.pmtiles, from foundation/contours.py) — one line
+// layer per tier so each gets its own minzoom from VIEWER_STYLE.contours, plus
+// elevation labels on the 25/100 m lines. The tiles carry every line from z10, so
+// all thinning is these minzooms. Toggled as the "Contour lines" map-layer category.
+const CONTOUR_LAYER_IDS = ['contours-100', 'contours-25', 'contours-5', 'contours-labels'];
+function contourLayers() {
+  const C = VIEWER_STYLE.contours;
+  const lines = Object.entries(C.tiers).map(([level, t]) => ({
+    id: `contours-${level}`, type: 'line', source: 'contours', 'source-layer': 'contours',
+    minzoom: t.minzoom, filter: ['==', ['get', 'level'], Number(level)],
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: {
+      'line-color': C.color, 'line-opacity': C.opacity,
+      'line-width': ['interpolate', ['linear'], ['zoom'], ...Object.entries(t.width).flatMap(([z, w]) => [Number(z), w])],
+    },
+  }));
+  return [...lines, {
+    id: 'contours-labels', type: 'symbol', source: 'contours', 'source-layer': 'contours',
+    minzoom: C.labels.minzoom, filter: ['in', ['get', 'level'], ['literal', [25, 100]]],
+    layout: {
+      'symbol-placement': 'line', 'text-field': ['to-string', ['get', 'ele']],
+      'text-font': ['Open Sans Regular'], 'text-size': C.labels.size, 'symbol-spacing': C.labels.spacing,
+    },
+    paint: { 'text-color': C.color, 'text-halo-color': C.labels.haloColor, 'text-halo-width': C.labels.haloWidth },
+  }];
 }
 
 // Shared by applyAltitude() below.
@@ -682,6 +710,11 @@ const map = new maplibregl.Map({
         tileSize: 256,
         minzoom: 12,
         maxzoom: 16,
+      },
+      contours: {
+        type: 'vector',
+        url: `pmtiles://${TILE_BASE}/contours.pmtiles`,
+        attribution: '© Lantmäteriet LiDAR',
       },
       osmvec: {
         type: 'vector',
@@ -761,6 +794,9 @@ const map = new maplibregl.Map({
       { id: 'osm-buildings', type: 'fill', source: 'osmvec', 'source-layer': 'buildings', minzoom: 14,
         paint: { 'fill-color': VIEWER_STYLE.osm.buildings.color, 'fill-opacity': VIEWER_STYLE.osm.buildings.opacity },
       },
+      // Contours — above hillshade/area fills, below every line layer so trails
+      // and paths always draw on top of them.
+      ...contourLayers(),
       // Selected-feature highlight (click a line to select it) — wide blurred
       // glow + a crisper core, sitting *below* the actual line layers so the
       // real feature (its own color/width) stays fully visible on top, with
@@ -985,6 +1021,7 @@ const OSM_CATEGORIES = [
   { key: 'vegetation', label: 'Vegetation areas', layers: ['osm-landuse'] },
   { key: 'water',      label: 'Water areas',      layers: ['osm-water', 'osm-wetland-pattern'] },
   { key: 'others',     label: 'Others',           layers: ['osm-buildings', 'osm-peaks-tri', 'osm-peaks-label', 'osm-places'] },
+  { key: 'contours',   label: 'Contour lines',    layers: CONTOUR_LAYER_IDS },
 ];
 
 function applyAllOsmCategories() {

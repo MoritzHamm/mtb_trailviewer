@@ -28,7 +28,8 @@ here today is the map viewing/rendering foundation that editor will sit on top o
 ## Tile files
 
 `tiles/` is gitignored (large binaries). Expected contents when fully populated:
-`dalarna.pmtiles` (OSM vector layers), `terrain.pmtiles` (terrain-RGB elevation, symlink
+`dalarna.pmtiles` (OSM vector layers), `contours.pmtiles` (5 m contour lines, ~1GB,
+copy of `~/lidar-output/contours/contours_dalarna_s3.pmtiles`), `terrain.pmtiles` (terrain-RGB elevation, symlink
 to `/mnt/g/lidar-output/terrain.pmtiles` on the desktop), `vegheight.pmtiles` +
 `wetness.pmtiles` (each a separate single-channel/grayscale WebP tileset — reworked
 from one packed `overlay.pmtiles`, see `foundation/CLAUDE.md`'s "Overlay status"; not
@@ -146,6 +147,18 @@ Grouping calls worth knowing: natural linear features (cliffs/ridges, `osm-natur
 went in with railways/powerlines as "Other lines" rather than getting their own category;
 buildings/peaks/places are the "Others" catch-all. Revisit either if they end up wanting
 independent toggles.
+
+**Contour lines** are the last category ("Contour lines", `osmCat_contours`, **off by
+default**), though they aren't OSM: source `contours` → `tiles/contours.pmtiles`, the
+full-Dalarna 5 m contours from `foundation/contours.py` (approved σ 3 m look; see
+`foundation/CLAUDE.md` "Contours"). The tiles hold every line from z10 (built with
+`--tiers 100:10,25:10,5:10`), so thinning happens in the style: `contourLayers()` builds
+one line layer per tier (`contours-100`/`-25`/`-5`, filtered on the `level` property)
+with each tier's `minzoom` + width ramp from `VIEWER_STYLE.contours.tiers`, plus
+`contours-labels` (elevations on 25/100 m lines from z14). Drawn above hillshade/area
+fills and below selection glow, trail status and every line layer, so trails stay on
+top. Tune the look in `style-config.js`; the stand-alone `contours-preview.html` has
+live sliders for finding tier minzooms.
 
 **Water vs. wetland — a real, useful data duplication, not a bug to "fix".**
 `foundation/extract_osm_polygons.py`'s `WATER_NATURAL` and `NATURAL_LANDCOVER` sets both

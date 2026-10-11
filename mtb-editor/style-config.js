@@ -142,6 +142,21 @@ const VIEWER_STYLE = {
     pulse: { periodMs: 1400, opacityMin: 0.35, opacityMax: 0.95, widthMin: 8, widthMax: 16 },
   },
 
+  // Contour lines (tiles/contours.pmtiles, built by foundation/contours.py — the
+  // approved σ 3 m / 5 m-interval look, every line kept in the tiles from z10, so
+  // all thinning happens here). Each line's `level` is the coarsest tier it belongs
+  // to (100 / 25 / 5 m); minzoom is when that tier starts showing.
+  contours: {
+    color: '#8a4b14',
+    opacity: 0.75,
+    tiers: {
+      100: { minzoom: 10, width: { 10: 0.8, 14: 1.8, 17: 2.6 } },
+      25:  { minzoom: 10, width: { 10: 0.5, 14: 1.1, 17: 1.8 } },
+      5:   { minzoom: 12, width: { 12: 0.3, 14: 0.4, 17: 1.0 } },
+    },
+    labels: { minzoom: 14, size: 10, spacing: 400, haloColor: 'rgba(255,255,255,0.8)', haloWidth: 1.5 },
+  },
+
   // Projects/tracks (see tracks.js) — a planning/staging layer distinct from OSM
   // trails, so it's styled distinctly too: dashed lines (nothing here is "real"
   // yet) in colors that don't collide with trailStatus/osm.path's mtb:scale ramp.
