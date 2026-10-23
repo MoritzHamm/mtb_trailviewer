@@ -26,11 +26,13 @@
 #   3. WebP overlay tiles    → $WORK_FAST/overlay-tiles/{vegheight,wetness}/  (Z12-16 by
 #                                                          default, see --overlay-max-zoom=)
 #   4. Overlay PMTiles       → $WORK_SLOW/{vegheight,wetness}.pmtiles
+#   4b. Rock / cliff layer   → $WORK_FAST/rock.tif → $WORK_FAST/rock-tiles/rock/
+#                               → $WORK_SLOW/rock.pmtiles  (compute_rock.py, from the DTM)
 #   5. Terrain RGB tiles     → $WORK_FAST/terrain-tiles/  → $WORK_SLOW/terrain.pmtiles
 #   6. Copy tiles to mtb-editor/tiles/
 #
 # Usage:
-#   bash build_pipeline.sh [--skip-osm] [--skip-overlay] [--skip-terrain]
+#   bash build_pipeline.sh [--skip-osm] [--skip-overlay] [--skip-rock] [--skip-terrain]
 #   bash build_pipeline.sh --skip-osm                      # overlay + terrain only
 #   bash build_pipeline.sh --skip-terrain --skip-overlay   # OSM/vectors only
 #   bash build_pipeline.sh --work-fast=/path --work-slow=/path --mtb-editor-dir=/path
@@ -53,6 +55,7 @@ OSM_PBF="$LIDAR_DIR/osm/sweden-latest.osm.pbf"
 # -----------------------------------------------------------------------------
 SKIP_OSM=false
 SKIP_OVERLAY=false
+SKIP_ROCK=false
 SKIP_TERRAIN=false
 MAX_ZOOM=17
 OVERLAY_MAX_ZOOM=16   # Z17 is ~75% of the tile count for detail that doesn't matter
@@ -69,6 +72,7 @@ for arg in "$@"; do
   case $arg in
     --skip-osm)      SKIP_OSM=true ;;
     --skip-overlay)  SKIP_OVERLAY=true ;;
+    --skip-rock)     SKIP_ROCK=true ;;
     --skip-terrain)  SKIP_TERRAIN=true ;;
     --max-zoom=*)    MAX_ZOOM="${arg#--max-zoom=}" ;;
     --overlay-max-zoom=*) OVERLAY_MAX_ZOOM="${arg#--overlay-max-zoom=}" ;;
@@ -97,6 +101,9 @@ VEC_PMTILES="$WORK_SLOW/dalarna.pmtiles"
 OVERLAY_TILES="$WORK_FAST/overlay-tiles"
 VEGHEIGHT_PMTILES="$WORK_SLOW/vegheight.pmtiles"
 WETNESS_PMTILES="$WORK_SLOW/wetness.pmtiles"
+ROCK_TIF="$WORK_FAST/rock.tif"
+ROCK_TILES="$WORK_FAST/rock-tiles"   # own dir: generate_overlay_tiles.py's done-markers are per out dir
+ROCK_PMTILES="$WORK_SLOW/rock.pmtiles"
 TERRAIN_TILES="$WORK_FAST/terrain-tiles"
 TERRAIN_PMTILES="$WORK_SLOW/terrain.pmtiles"
 
@@ -185,6 +192,21 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+# Step 4b: Rock / cliff layer (DTM roughness + slope, OSM man-made edges masked)
+# -----------------------------------------------------------------------------
+if [ "$SKIP_ROCK" = false ]; then
+  log "Step 4b: Computing rock / cliff raster"
+  python "$LIDAR_DIR/compute_rock.py" "$DTM_VRT" "$ROCK_TIF" \
+    --bbox $BBOX --osm-dir "$OSM_LAYERS"
+  python "$LIDAR_DIR/generate_overlay_tiles.py" --rock "$ROCK_TIF" \
+    --out "$ROCK_TILES" --bbox $BBOX --zoom 12 "$OVERLAY_MAX_ZOOM"
+  python "$LIDAR_DIR/pack_tiles.py" \
+    "$ROCK_TILES/rock" "$ROCK_PMTILES" --name rock --format webp
+else
+  log "Skipping rock layer (--skip-rock)"
+fi
+
+# -----------------------------------------------------------------------------
 # Step 5: Terrain RGB tiles
 # -----------------------------------------------------------------------------
 if [ "$SKIP_TERRAIN" = false ]; then
@@ -224,6 +246,7 @@ link_if_exists() {
 copy_if_exists "$VEC_PMTILES"       "$VIEWER/dalarna.pmtiles"
 link_if_exists "$VEGHEIGHT_PMTILES" "$VIEWER/vegheight.pmtiles"
 link_if_exists "$WETNESS_PMTILES"   "$VIEWER/wetness.pmtiles"
+link_if_exists "$ROCK_PMTILES"      "$VIEWER/rock.pmtiles"
 link_if_exists "$TERRAIN_PMTILES"   "$VIEWER/terrain.pmtiles"
 copy_if_exists "$TERRAIN_TILES/coverage.geojson" "$VIEWER/coverage.geojson"
 

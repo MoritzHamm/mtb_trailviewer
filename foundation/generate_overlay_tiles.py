@@ -6,6 +6,15 @@ Writes one single-channel (grayscale "L") WebP tile pyramid per analysis layer:
 
   vegheight/{z}/{x}/{y}.webp  — CHM, 0=bare ground, 255=35 m canopy
   wetness/{z}/{x}/{y}.webp    — SLU wetness, 0=dry (SLU 0), 255=wet (SLU 100)
+  rock/{z}/{x}/{y}.webp       — compute_rock.py output, passed through unchanged
+                                (0 none, 1-127 rough ground, 128-255 cliff face)
+
+The rock layer differs from the other two on purpose: it's downsampled with *max*
+(not bilinear), so a 1 m cliff still shows at Z12 instead of averaging away, and it's
+written as *lossless* WebP, since lossy compression would smear values across the
+127/128 rough/cliff band boundary. Its source has nodata=0, so tiles with no rock at
+all are never written (the viewer treats a missing tile as transparent) — mostly
+empty and lossless, the tiles stay small.
 
 Deliberately NOT packed into one RGBA tile (that was tried and measured wrong): WebP
 lossy always transforms RGB→YUV with 4:2:0 chroma subsampling, regardless of quality —
@@ -145,7 +154,7 @@ def fill_nodata(data, mask):
 
 
 def _read_strip(src_path: str, strip_transform: Affine, strip_w: int,
-                neutral: float, resampling=Resampling.bilinear
+                neutral: float, resampling=Resampling.bilinear, fill: bool = True
                 ) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
     """Read one channel for a horizontal strip (TILE_SIZE rows, strip_w cols).
 
@@ -153,6 +162,8 @@ def _read_strip(src_path: str, strip_transform: Affine, strip_w: int,
     where this source actually had a real pixel), so callers can tell real coverage
     apart from gap-filled/neutral values even after fill_nodata smooths the output.
     (None, None) means the whole strip had no real data at all.
+    fill=False sets gaps to `neutral` instead of nearest-filling them — for
+    sparse layers (rock) where nodata means "nothing here", not "unknown".
     """
     dst = np.full((TILE_SIZE, strip_w), np.nan, dtype=np.float32)
     with rasterio.open(src_path) as src:
@@ -172,7 +183,8 @@ def _read_strip(src_path: str, strip_transform: Affine, strip_w: int,
         return None, None
     mask = ~valid
     if mask.any():
-        dst = fill_nodata(dst, mask)
+        if fill:
+            dst = fill_nodata(dst, mask)
         dst[~np.isfinite(dst)] = neutral
     return dst, valid
 
@@ -225,7 +237,12 @@ def _strip_worker(args: tuple) -> int:
     # a fully-empty CHM strip also returns chm_valid=None).
     chm_s, chm_valid = _read_strip(paths['chm'],     strip_tf, strip_w, 0.0) if paths.get('chm')     else (None, None)
     wet_s, wet_valid = _read_strip(paths['wetness'], strip_tf, strip_w, 0.0) if paths.get('wetness') else (None, None)
-    gate_valid = chm_valid if paths.get('chm') else wet_valid
+    rock_s, rock_valid = (_read_strip(paths['rock'], strip_tf, strip_w, 0.0,
+                                      resampling=Resampling.max, fill=False)
+                          if paths.get('rock') else (None, None))
+    # Rock-only runs gate on rock itself: its nodata=0 makes that "any rock in tile"
+    gate_valid = (chm_valid if paths.get('chm') else
+                  wet_valid if paths.get('wetness') else rock_valid)
 
     def to_uint8_chm(a): return np.clip(np.round(a / 35.0 * 255), 0, 255).astype(np.uint8)
     def to_uint8_wet(a): return np.clip(np.round(a * 2.55), 0, 255).astype(np.uint8)
@@ -250,6 +267,11 @@ def _strip_worker(args: tuple) -> int:
             p = _tile_path(out_dir, 'wetness', z, tx, ty)
             p.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(to_uint8_wet(wet_s[:, c0:c1]), 'L').save(p, 'WEBP', quality=webp_quality)
+        if rock_s is not None and rock_valid[:, c0:c1].any():
+            p = _tile_path(out_dir, 'rock', z, tx, ty)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            rock_u8 = np.clip(np.round(rock_s[:, c0:c1]), 0, 255).astype(np.uint8)
+            Image.fromarray(rock_u8, 'L').save(p, 'WEBP', lossless=True)
 
         marker.touch()
         written += 1
@@ -376,6 +398,8 @@ def generate_overlay_tiles(paths: dict, out_dir: Path,
         log(f"  python pack_tiles.py {out_dir}/vegheight vegheight.pmtiles --format webp --name vegheight")
     if (out_dir / 'wetness').is_dir():
         log(f"  python pack_tiles.py {out_dir}/wetness   wetness.pmtiles   --format webp --name wetness")
+    if (out_dir / 'rock').is_dir():
+        log(f"  python pack_tiles.py {out_dir}/rock      rock.pmtiles      --format webp --name rock")
 
 
 def main() -> None:
@@ -384,6 +408,9 @@ def main() -> None:
     ap.add_argument('--chm',     help='CHM GeoTIFF (float32, metres) → vegheight/ tiles; '
                          'also gates which tiles count as real coverage for both layers')
     ap.add_argument('--wetness', help='Wetness GeoTIFF (float32, 0-100) → wetness/ tiles')
+    ap.add_argument('--rock',    help='compute_rock.py GeoTIFF (uint8, nodata=0) → rock/ tiles '
+                         '(max-downsampled, lossless). Done-markers are shared across '
+                         'layers, so use a separate --out for a rock-only run')
     ap.add_argument('--out',     default='viewer/overlay-tiles',
                     help='Output directory — gets vegheight/ and/or wetness/ subdirs '
                          '(default: viewer/overlay-tiles)')
@@ -406,10 +433,11 @@ def main() -> None:
     paths = {
         'chm':     args.chm,
         'wetness': args.wetness,
+        'rock':    args.rock,
     }
 
     if not any(paths.values()):
-        ap.error("Provide at least one of --chm, --wetness")
+        ap.error("Provide at least one of --chm, --wetness, --rock")
 
     log("Overlay tile inputs:")
     bbox_3006 = tuple(args.bbox) if args.bbox else None

@@ -12,7 +12,7 @@
 # bucket-scoped R2 API token.
 #
 # Usage:
-#   bash deploy.sh                        # static assets + dalarna + contours + terrain
+#   bash deploy.sh                        # static assets + dalarna + contours + rock + terrain
 #   bash deploy.sh --skip-terrain         # static assets + dalarna + contours
 #   bash deploy.sh --with-overlay         # also upload vegheight/wetness.pmtiles
 #   bash deploy.sh --remote=X --bucket=Y  # override rclone remote/bucket name
@@ -74,6 +74,20 @@ if [ -f "$MTB_DIR/tiles/contours.pmtiles" ]; then
   rclone copyto "$CONTOURS_REAL" "$DEST/tiles/contours.pmtiles" "${RCLONE_BIG[@]}"
 else
   log "No tiles/contours.pmtiles here — skipping (the viewer's contour layer will be empty)"
+fi
+
+# Rock / cliffs (foundation/compute_rock.py, full Dalarna). Optional like contours;
+# the size floor keeps a small local test build from overwriting the real one.
+if [ -f "$MTB_DIR/tiles/rock.pmtiles" ]; then
+  ROCK_REAL="$(readlink -f "$MTB_DIR/tiles/rock.pmtiles")"
+  if [ "$(stat -c %s "$ROCK_REAL")" -lt 200000000 ]; then
+    log "ERROR: $ROCK_REAL is under 200MB — not the full-Dalarna rock layer. Not uploading."
+    exit 1
+  fi
+  log "Uploading rock.pmtiles"
+  rclone copyto "$ROCK_REAL" "$DEST/tiles/rock.pmtiles" "${RCLONE_BIG[@]}"
+else
+  log "No tiles/rock.pmtiles here — skipping (the Rock / cliffs background will be empty)"
 fi
 
 if [ "$SKIP_TERRAIN" = false ]; then

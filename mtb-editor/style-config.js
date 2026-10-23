@@ -35,7 +35,8 @@ const VIEWER_STYLE = {
   // terrain-RGB tiles) but chosen for cycling relevance rather than an even
   // spread across 0-50°: nearly-flat ground stays blue through a full degree,
   // ramps to orange by 5° (~8.7% grade), to red by 25% grade (~14.0°), to
-  // violet by 100% grade (45°, "wall" steep) and clamps there.
+  // violet by 100% grade (45°, "wall" steep), then to near-black by 60° so
+  // cliff faces stand out from merely steep ground, and clamps there.
   slope: {
     stops: [
       { deg: 0,                               color: [33, 102, 224] },  // blue — flat
@@ -43,6 +44,7 @@ const VIEWER_STYLE = {
       { deg: 5,                               color: [255, 140, 0] },   // orange by 5°
       { deg: Math.atan(0.25) * 180 / Math.PI, color: [220, 30, 30] },   // red by 25% grade
       { deg: Math.atan(1)    * 180 / Math.PI, color: [154, 30, 200] },  // violet by 100% grade
+      { deg: 60,                              color: [25, 10, 35] },    // near-black by 60° — cliff
     ],
   },
 
@@ -50,6 +52,15 @@ const VIEWER_STYLE = {
   // (grayscale) tilesets, see generate_overlay_tiles.py
   wetness:   { colorLow: [168, 138, 91],  colorHigh: [27, 79, 114] },  // dry tan → wet blue
   vegheight: { colorLow: [194, 178, 128], colorHigh: [18, 63, 18] },   // bare tan → dark canopy green
+
+  // Rock / cliffs (rock.pmtiles, foundation/compute_rock.py) — two bands in one
+  // grayscale tileset, each with its own RGBA ramp (alpha in [3]); 0 is transparent.
+  // Drawn over the dark solid background + hillshade, so both bands are bright.
+  rock: {
+    opacity: 0.9,
+    rough: { low: [255, 200, 90, 70],  high: [255, 140, 0, 235] },   // faint amber → solid orange (0.2 → 0.7 m roughness)
+    cliff: { low: [240, 40, 40, 235],  high: [255, 60, 220, 255] },  // red → hot magenta (40° → 60° slope)
+  },
 
   // Selected-feature highlight (click a trail/road/etc.) — bright gold glow,
   // similar to OSM's own iD editor selection style. Two stacked line layers:

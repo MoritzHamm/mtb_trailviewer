@@ -112,7 +112,20 @@ well under that on the terrain/overlay files (~250GB).
 - Slope color ramp (`style-config.js`, `VIEWER_STYLE.slope.stops`) is anchored in
   degrees but chosen for cycling relevance, not an even spread: flat stays blue through
   1°, ramps to orange by 5° (~8.7% grade), red by 25% grade (~14.0°), violet by 100%
-  grade (45°, clamps there).
+  grade (45°), near-black by 60° (cliff faces; clamps there).
+
+## Rock / cliffs background mode
+
+`rock.pmtiles` (from `foundation/compute_rock.py`, see `foundation/CLAUDE.md` "Rock /
+cliff layer") goes through the same `makeGrayscaleProtocol` as wetness/vegheight, which
+now takes a value → `[r,g,b,a]` function instead of two colors. `rockColor()` maps
+0 → transparent, 1–127 → the rough-ground ramp, 128–255 → the cliff ramp; colors and
+alphas are in `VIEWER_STYLE.rock` (bright on purpose, since it's drawn over the dark
+solid background + hillshade). Missing tiles mean "no rock" (the archive only contains
+tiles that have some). `tiles/rock.pmtiles` is a symlink to the full-Dalarna build
+(`/mnt/g/lidar-output/rock.pmtiles`, 2.8 GB). `deploy.sh` uploads it whenever present,
+refusing anything under 200 MB (so the 10×10 km test build in `~/lidar-output/rock-test/`
+can't overwrite the real one on R2).
 
 ## Canvas premultiplied-alpha bug (history — why the overlay decode changed)
 

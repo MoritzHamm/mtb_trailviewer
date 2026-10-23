@@ -32,6 +32,47 @@ them from git.
   default overlap=256 covers sigma≤85). **Currently unused** — removed from the overlay
   pipeline pending a dedicated test setup (see `generate_overlay_tiles.py` below).
 
+### Rock / cliff layer
+- **`compute_rock.py`** — DTM → `rock.tif` (uint8, nodata=0), block-processed like
+  `compute_lrm.py`. Two bands in one channel: **1–127 rough ground** (local RMS over
+  5×5 of DTM − Gaussian σ3 m, ramped 0.2 → 0.7 m) and **128–255 cliff face** (1 m slope,
+  40° → 60°, wins over roughness). OSM roads/railways (10 m), tracks/buildings (5 m)
+  and real-water shorelines (3 m, wetlands excluded) are buffered and masked to 0,
+  since road cuts/embankments/building edges/gap-filled shores score as high as rock.
+  Paths are deliberately not masked. 10×10 km around Falun: ~5 s compute + ~40 s OSM
+  loading, 6.7 MB tif.
+  `generate_overlay_tiles.py --rock` tiles it with **max** downsampling (a 1 m cliff
+  still shows at Z12) and **lossless** WebP (lossy would smear values across the
+  127/128 band boundary); tiles with no rock aren't written at all. Use a separate
+  `--out` from the vegheight/wetness run (done-markers are per out dir). Test area:
+  1,567 tiles Z12–16, 7.6 MB `rock.pmtiles` — roughly 2 GB extrapolated to Dalarna.
+  `build_pipeline.sh` runs it as step 4b (`--skip-rock` to skip).
+  **Full Dalarna (2026-10-18):** `rock.tif` 2.5 GB in `~/lidar-output/` (3,904 blocks,
+  ~34 min on 12 workers, ~4 GB peak RSS; OSM mask load ~70 s for 470k features);
+  tiling Z12–16 ~30 min → 461,419 tiles, 3.7 GB tile dir, **2.8 GB
+  `/mnt/g/lidar-output/rock.pmtiles`**. z12 mosaic checked: no block seams, lakes empty,
+  rougher terrain in the south/east than on the NW till plateaus.
+
+  **Calibration (2026-10-18)** against spots given by the user, test area
+  E 527500–537500 / N 6717500–6727500, `~/lidar-output/rock-test/`:
+  | spot (WGS84) | what it is | result |
+  |---|---|---|
+  | 60.627188, 15.578835 | Lövberget, east-facing cliffs | both faces as cliff lines, rough ground around |
+  | 60.633398, 15.571107 | one big boulder | distinct rough blob (peak roughness ~0.38 m) |
+  | 60.631607, 15.628385 | Jungfruberget, cliffs + boulders | cliff + dense rough ground (also an OSM `natural=cliff`) |
+  | 60.620048, 15.660815 | ski-jump runout, man-made cliff | strong cliff band (not masked, by design) |
+  | 60.672612, 15.535891 | very steep, many boulders, few real cliffs | dense rough field with short cliff steps |
+  | 60.627799, 15.566182 | steep west-facing slopes, **no** cliff | quiet — roughness p99 0.22 m vs ~0.35 m p95 on rocky ground |
+  Steepness alone doesn't separate these; roughness does. Remaining false positives:
+  unmapped forest roads/ditches/platforms, deep gullies.
+
+  **Point-cloud boulder signals were tried and rejected for v1.** "Single-return points
+  0.4–3 m above ground" mostly measured young forest/shrub (88% of hits under <8 m
+  canopy — a boulder under canopy is the *last of several* returns, never a single
+  return). "Pulse's last return stopped 0.4–3 m above ground" is physically better
+  motivated but mostly lit up cars/sheds/fences and scattered single cells; it didn't
+  stand out at any of the spots above. Exploration scripts were throwaway (not kept).
+
 ### OSM extraction
 - **`extract_osm.py`** — PBF → line/point GeoJSON layers (roads, tracks, paths,
   waterways, railways, powerlines, natural_lines, peaks, places). Two-pass: pass 1
@@ -187,8 +228,12 @@ just refactored. Treat any old references to a working `contours.py` as aspirati
 2. **Contour generation** — needs building from scratch: trace contours from the DTM,
    simplify (Douglas-Peucker), smooth (Chaikin), output in SWEREF99TM/WGS84 (not pixel
    space), tiered by 5m/25m/100m hierarchy for styling.
-3. **Cliff detection** — derive from DTM slope raster (slope > threshold → cliff),
-   output as vector polygons/lines.
+3. **Cliff detection** — raster version done (`compute_rock.py`, see "Rock / cliff
+   layer"), built for full Dalarna; still to do: deploy (`mtb-editor/deploy.sh` picks
+   up `tiles/rock.pmtiles`), and optionally vector cliff lines from the 128–255 band.
+   Man-made false positives (road embankments, tunnel portals) are accepted as-is —
+   the user judged OSM not accurate enough to mask them further and they're easy to
+   recognise by eye.
 4. **SVF (Sky View Factor)** — currently a placeholder-0 channel (B) in
    `generate_overlay_tiles.py`; needs an actual computation.
 5. **Overlay rework** — code done, see "Overlay status" above. Still needed: run the

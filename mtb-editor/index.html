@@ -71,6 +71,7 @@
     <option value="slope">Slope colors</option>
     <option value="wetness">Wetness</option>
     <option value="vegetation">Vegetation height</option>
+    <option value="rock">Rock / cliffs</option>
     <option value="none">None</option>
   </select>
 
@@ -509,8 +510,9 @@ maplibregl.addProtocol('slope', async (params) => {
 // ---------------------------------------------------------------------------
 const vegheightTiles = new pmtiles.PMTiles(`${TILE_BASE}/vegheight.pmtiles`);
 const wetnessTiles   = new pmtiles.PMTiles(`${TILE_BASE}/wetness.pmtiles`);
+const rockTiles      = new pmtiles.PMTiles(`${TILE_BASE}/rock.pmtiles`);
 
-const OVERLAY_MAX_ZOOM = 16; // vegheight/wetness archives only go this far (generate_overlay_tiles.py)
+const OVERLAY_MAX_ZOOM = 16; // vegheight/wetness/rock archives only go this far (generate_overlay_tiles.py)
 
 // Per-tile request cache/dedup — at deep zoom (>OVERLAY_MAX_ZOOM), many
 // different on-screen "virtual" tiles all resolve to the same underlying
@@ -524,7 +526,8 @@ const OVERLAY_MAX_ZOOM = 16; // vegheight/wetness archives only go this far (gen
 // makes re-panning back over already-seen tiles instant. No eviction: a
 // session's worth of viewed tiles at a few KB (WebP) each stays small enough
 // not to matter.
-function makeGrayscaleProtocol(tileset, colorLow, colorHigh, label) {
+// colorFn maps a 0-255 tile value to [r, g, b, a].
+function makeGrayscaleProtocol(tileset, colorFn) {
   const cache = new Map(); // "z/x/y" -> Promise<ArrayBuffer> (recolored PNG bytes)
 
   async function loadAndRecolor(z, x, y) {
@@ -541,9 +544,9 @@ function makeGrayscaleProtocol(tileset, colorLow, colorHigh, label) {
       const out = new ImageData(S, S);
       const dst = out.data;
       for (let i = 0; i < src.length; i += 4) {
-        const t = src[i] / 255;   // grayscale: R=G=B, so channel 0 is the value
-        const [r, g, b] = lerpColor(colorLow, colorHigh, t);
-        dst[i] = r; dst[i + 1] = g; dst[i + 2] = b; dst[i + 3] = 255;
+        // grayscale: R=G=B, so channel 0 is the value
+        const [r, g, b, a] = colorFn(src[i]);
+        dst[i] = r; dst[i + 1] = g; dst[i + 2] = b; dst[i + 3] = a;
       }
 
       const dstCanvas = new OffscreenCanvas(S, S);
@@ -578,10 +581,24 @@ function makeGrayscaleProtocol(tileset, colorLow, colorHigh, label) {
   };
 }
 
-maplibregl.addProtocol('wetness',
-  makeGrayscaleProtocol(wetnessTiles, VIEWER_STYLE.wetness.colorLow, VIEWER_STYLE.wetness.colorHigh, 'wetness'));
-maplibregl.addProtocol('vegheight',
-  makeGrayscaleProtocol(vegheightTiles, VIEWER_STYLE.vegheight.colorLow, VIEWER_STYLE.vegheight.colorHigh, 'vegheight'));
+function twoStopRamp({ colorLow, colorHigh }) {
+  return v => [...lerpColor(colorLow, colorHigh, v / 255), 255];
+}
+
+// Rock (foundation/compute_rock.py): 0 = nothing (transparent), 1-127 = rough
+// ground, 128-255 = cliff face — each band has its own RGBA ramp.
+function rockColor(v) {
+  if (v === 0) return [0, 0, 0, 0];
+  const { rough, cliff } = VIEWER_STYLE.rock;
+  const band = v < 128 ? rough : cliff;
+  const t = v < 128 ? (v - 1) / 126 : (v - 128) / 127;
+  return [...lerpColor(band.low, band.high, t),
+          Math.round(band.low[3] + (band.high[3] - band.low[3]) * t)];
+}
+
+maplibregl.addProtocol('wetness',   makeGrayscaleProtocol(wetnessTiles,   twoStopRamp(VIEWER_STYLE.wetness)));
+maplibregl.addProtocol('vegheight', makeGrayscaleProtocol(vegheightTiles, twoStopRamp(VIEWER_STYLE.vegheight)));
+maplibregl.addProtocol('rock',      makeGrayscaleProtocol(rockTiles,      rockColor));
 
 const CENTER_LNG = 14.445;   // full Dalarna region
 const CENTER_LAT = 61.005;
@@ -692,7 +709,9 @@ const map = new maplibregl.Map({
         tiles: ['slope://{z}/{x}/{y}'],
         tileSize: 256,
         minzoom: 8,
-        maxzoom: 15,
+        // 16 ≈ the DTM's native 1 m; at 15 (~2.35 m/px) small rock faces average
+        // out below the 60° cliff stop entirely (measured on the Lövberget tile).
+        maxzoom: 16,
       },
       'wetness-tiles': {
         type: 'raster',
@@ -707,6 +726,13 @@ const map = new maplibregl.Map({
       'vegheight-tiles': {
         type: 'raster',
         tiles: ['vegheight://{z}/{x}/{y}'],
+        tileSize: 256,
+        minzoom: 12,
+        maxzoom: 16,
+      },
+      'rock-tiles': {
+        type: 'raster',
+        tiles: ['rock://{z}/{x}/{y}'],
         tileSize: 256,
         minzoom: 12,
         maxzoom: 16,
@@ -759,6 +785,10 @@ const map = new maplibregl.Map({
       { id: 'vegheight-overlay', type: 'raster', source: 'vegheight-tiles',
         layout: { visibility: 'none' },
         paint: { 'raster-opacity': 0.7, 'raster-fade-duration': 0 },
+      },
+      { id: 'rock-overlay', type: 'raster', source: 'rock-tiles',
+        layout: { visibility: 'none' },
+        paint: { 'raster-opacity': VIEWER_STYLE.rock.opacity, 'raster-fade-duration': 0 },
       },
       { id: 'hillshade', type: 'hillshade', source: 'terrain', paint: {
           'hillshade-illumination-anchor': 'map',
@@ -2207,6 +2237,7 @@ const CHANNEL_BG_LAYERS = {
   slope: 'slope-overlay',
   wetness: 'wetness-overlay',
   vegetation: 'vegheight-overlay',
+  rock: 'rock-overlay',
 };
 
 function applyBackground(chosen) {
