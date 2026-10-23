@@ -262,6 +262,12 @@ each does) must be run in order (SQL Editor) — `0002` in particular is require
 any insert will work at all, since the client code doesn't pass `created_by` explicitly
 and relies on the default it adds.
 
+**`spatial_ref_sys` linter warning:** PostGIS was installed into `public` (0001), so
+its SRID lookup table is API-exposed with RLS off. RLS can't be enabled (owned by
+`supabase_admin`), and moving PostGIS to `extensions` means `DROP EXTENSION ... CASCADE`
+(drops every geography column). `0009_lock_spatial_ref_sys.sql` revokes anon/authenticated
+writes instead; the warning itself persists and can be dismissed.
+
 **Frontend — click-to-add-entry flow (built):** clicking a feature that qualifies as a
 trail (`getTrailIdentity()`, `index.html`) adds buttons to its popup when logged in:
 "Add entry to trail", "Add entry at this point", and (only if the trail already has

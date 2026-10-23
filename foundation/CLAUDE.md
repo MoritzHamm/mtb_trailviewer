@@ -114,6 +114,54 @@ them from git.
   `Progress(...)` (in-place `\r`-refreshed line with ETA, so long tile loops don't
   flood logs with one line per checkpoint).
 
+### Contours
+- **`contours.py`** — DTM → contour lines (default 5 m), as WGS84 GeoJSON + PMTiles
+  (layer `contours`, properties `ele` and `level` = 100/25/5, the coarsest tier the
+  line belongs to). Runs in overlapping chunks in parallel: NaN-aware Gaussian
+  pre-smooth (`--sigma`, default 3 m — raw 1 m LiDAR contours are jagged) →
+  `gdal_contour` (CLI; no GDAL Python bindings in the venv) → clip to chunk core →
+  Douglas-Peucker (`--simplify` 0.5 m) → Chaikin (`--chaikin` 2, endpoints pinned so
+  neighbouring chunks still meet) → drop closed rings < `--min-ring` 40 m → line-merge
+  per elevation across seams. PMTiles zoom tiers (`--tiers`, default
+  `100:10,25:12,5:14` = level:first zoom it's written into tiles); `--tiers
+  100:10,25:10,5:10` keeps every line at every zoom (~20% bigger file, densest z10 tile
+  ~190 KB) and leaves thinning to the map style — that's what the Falun preview files
+  use, since the default thinning felt too aggressive when zooming out. Writes to `~/lidar-output/contours/` (local disk on purpose).
+  ```
+  python contours.py --bbox 525000 6712000 545000 6732000 --name contours_falun
+  ```
+  **Approved baseline look (2026-10-10):** the defaults — `--sigma 3 --simplify 0.5
+  --chaikin 2 --min-ring 40` at 5 m interval ("looks great" on the Falun preview). Keep
+  these as the defaults; smoother variants are experiments, pass them explicitly.
+  Variants built for comparison (`mtb-editor/contours-preview.html`, local only):
+  `--sigma 6 --min-ring 80 --chaikin 3` and `--sigma 12 --min-ring 150 --chaikin 3` —
+  σ 12 is the pick for the stylised art piece.
+  Falun 20×20 km: ~26 s on 12 workers, 4,839 lines / 2.5M vertices, 56 MB GeoJSON,
+  9 MB PMTiles.
+
+  **Full Dalarna (2026-10-10)** uses `--stream`: each chunk's lines are appended to
+  `<name>.geojsonl` (newline-delimited GeoJSON) as soon as they're done instead of
+  being held in memory and seam-merged, so lines stay split at the 5 km chunk edges
+  (invisible when drawn; ~0.03% duplicated seam vertices). Output is written as
+  `.partial` and renamed only when every chunk succeeded; a failed chunk is logged and
+  the file isn't finalised. Region mode is unchanged (byte-identical output).
+  ```
+  python contours.py --stream --name contours_dalarna_s12 --sigma 12 --min-ring 150 \
+      --chaikin 3 --tiers 100:10,25:10,5:10 --workers 16      # bbox defaults to DTM extent
+  ```
+  | | σ 12 (art) | σ 3 (approved, trail viewer) |
+  |---|---|---|
+  | run time (16 workers) | 21 min | 17 min |
+  | lines / vertices | 219k / 224M | 498k / 220M |
+  | `.geojsonl` | 4.9 GB | 4.8 GB |
+  | `.pmtiles` | 595 MB | 946 MB |
+
+  Elevations 55–1195 m. Peak memory ~7 GB. Outputs in `~/lidar-output/contours/`.
+  Not wired into `build_pipeline.sh` / `mtb-editor/deploy.sh` yet.
+  Verified: no dangling line ends on internal chunk seams, and 60 sampled tiles
+  (z12/14/16) contain every source line. The lowest Falun contours (55–90 m) are the
+  Falu Gruva open pit, not an artefact.
+
 ### `build_pipeline.sh` — the orchestrator
 Runs OSM extraction → vector PMTiles → (optionally) overlay tiles → (optionally)
 terrain-RGB tiles → copies results into `mtb-editor/tiles/`.
@@ -210,6 +258,11 @@ happened yet (see "What Comes Next" below).
 - Route relations (`type=route`): PBFs list relations *after* the ways they reference,
   so a single streaming pass can't attach a route's name to its ways as it goes — this
   is why `extract_osm.py` does two passes (see above).
+- **tippecanoe 2.49: don't use the per-feature `"tippecanoe": {"minzoom": …}` key** for
+  contours — it made tippecanoe silently drop most lines from tiles (12 lines in, 1 out,
+  even with a no-op minzoom, key order irrelevant). `contours.py` gets the same zoom
+  tiers from a `-j` layer filter on `$zoom` instead. Verify tile contents with
+  `tippecanoe-decode` whenever adding tiering to other layers.
 - Overpass API returns 406 from WSL — use the local PBF instead
 - osmium pip package is `osmium`, not `pyosmium`
 - osmnx bbox area warning — bypass with direct osmium PBF reading (avoided by not using
@@ -217,26 +270,18 @@ happened yet (see "What Comes Next" below).
 
 ## What Comes Next (pipeline stabilisation)
 
-Documentation vs. reality check: contour-line generation (Gaussian pre-smooth → trace →
-Douglas-Peucker → Chaikin smoothing, described in earlier project notes) does **not**
-currently exist as a script anywhere in this repo — it needs to be re-implemented, not
-just refactored. Treat any old references to a working `contours.py` as aspirational.
-
-1. **Multi-tile merging** — `rasterio.merge` to mosaic adjacent DTM tiles with overlap
-   buffer (~20px); run contour generation (once it exists) on the merged raster to
-   avoid seam artifacts.
-2. **Contour generation** — needs building from scratch: trace contours from the DTM,
-   simplify (Douglas-Peucker), smooth (Chaikin), output in SWEREF99TM/WGS84 (not pixel
-   space), tiered by 5m/25m/100m hierarchy for styling.
-3. **Cliff detection** — raster version done (`compute_rock.py`, see "Rock / cliff
+1. **Contours into the pipeline** — full-Dalarna contours are built (see "Contours"
+   above). Still to do: wire `contours.py --stream` into `build_pipeline.sh` and the
+   chosen `.pmtiles` into `mtb-editor/deploy.sh` + the viewer style.
+2. **Cliff detection** — raster version done (`compute_rock.py`, see "Rock / cliff
    layer"), built for full Dalarna; still to do: deploy (`mtb-editor/deploy.sh` picks
    up `tiles/rock.pmtiles`), and optionally vector cliff lines from the 128–255 band.
    Man-made false positives (road embankments, tunnel portals) are accepted as-is —
    the user judged OSM not accurate enough to mask them further and they're easy to
    recognise by eye.
-4. **SVF (Sky View Factor)** — currently a placeholder-0 channel (B) in
+3. **SVF (Sky View Factor)** — currently a placeholder-0 channel (B) in
    `generate_overlay_tiles.py`; needs an actual computation.
-5. **Overlay rework** — code done, see "Overlay status" above. Still needed: run the
+4. **Overlay rework** — code done, see "Overlay status" above. Still needed: run the
    full-Dalarna build (`build_pipeline.sh --skip-osm --skip-terrain`, CHM+wetness only,
    several hours — produces `vegheight.pmtiles` + `wetness.pmtiles`), verify the
    reworked decode in a browser, then `mtb-editor/deploy.sh --with-overlay` to actually
