@@ -109,6 +109,19 @@ const VIEWER_STYLE = {
         [80,   '#ff7043', '80–90'],
         [100,  '#d50000', '≥ 100'],
       ] },
+      access: { label: 'Lorry access (forestry road class)', prop: 'access', kind: 'match', stops: [
+        ['A', '#43a047', 'A  all year'],
+        ['B', '#c0ca33', 'B  all year except spring thaw'],
+        ['C', '#ff9800', 'C  dry season only'],
+        ['D', '#29b6f6', 'D  frozen ground (winter) only'],
+      ] },
+      bk: { label: 'Bearing class (state/municipal)', prop: 'bk', kind: 'match', stops: [
+        ['BK4',  '#1b5e20', 'BK4  74 t'],
+        ['BK4s', '#7cb342', 'BK4 special terms'],
+        ['BK1',  '#c0ca33', 'BK1  64 t'],
+        ['BK2',  '#ff9800', 'BK2  51.4 t'],
+        ['BK3',  '#e53935', 'BK3  37.5 t'],
+      ] },
       net: { label: 'Network', prop: 'net', kind: 'match', stops: [
         ['bil',   '#ffffff', 'Car'],
         ['cykel', '#00e5ff', 'Cycle'],

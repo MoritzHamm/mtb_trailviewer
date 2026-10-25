@@ -99,7 +99,8 @@ them from git.
 - **`extract_nvdb.py`** — Lastkajen NVDB GeoPackage(s) → one WGS84 GeoJSON of road
   stretches with cycle-relevant attributes (`net`, `surface`, `klass`, `owner`, `speed`,
   `width`, `adt`/`adt_heavy`, `name`, `ref`, `category`, `subsid`, `gcm`,
-  `cycle_route`, `bridge` — see the docstring for value sets), then tippecanoe →
+  `cycle_route`, `bridge`, `access` (forestry A–D: all year / except thaw / dry season /
+  winter only), `bk` (bearing class), `max_weight` — see the docstring for value sets), then tippecanoe →
   `nvdb.pmtiles` (layer `nvdb`, z8–14, ~35MB for Dalarna). Source data CC0.
   Input: county package `Dalarnas_län_GeoPackage.zip` (extracted to
   `~/lidar-output/trafikverket/dalarnas_lan/dalarnas_lan.gpkg`); output
@@ -114,6 +115,15 @@ them from git.
   (`merge_asof`), and re-joins equal neighbours. Gotcha: `Net_VAG_Link` declares
   geometry type "3D Unknown", which pyogrio refuses — read it through SQLite SQL with
   `CastToXY(geom)`.
+- **Sweden-wide (Oct 2026):** 20 county packages (all but Västmanland, whose GeoPackage
+  order came back empty; its FileGDB uses the native `TNE_*` schema the script can't
+  read) extracted to `~/lidar-output/trafikverket/<county>_lan/<county>_lan.gpkg`
+  (filenames normalised to ASCII — the zips' names come out as mojibake). Run with
+  Dalarna first, ~26 min → `~/lidar-output/nvdb/nvdb_sweden.{geojson,pmtiles}` (1.4 GB /
+  629 MB, 2.97M stretches, ~676,000 km); `mtb-editor/tiles/nvdb.pmtiles` points at it.
+  Border roads: a link sequence crossing a county line can be in both packages, whole
+  or clipped to each county's part — so de-duplication is per link (sequence id +
+  measures), not per sequence (that dropped the second county's half).
 - Owner names are deliberately left out (private roads can be owned by persons).
 - Comparison with OSM (scratchpad analysis, Oct 2026): around Falun OSM roads are
   largely identical to NVDB (an import); in forest areas 26–35% of OSM road length is

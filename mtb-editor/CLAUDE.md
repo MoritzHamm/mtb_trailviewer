@@ -179,7 +179,7 @@ live sliders for finding tier minzooms.
 just above `osm-path`, so it sits on top of the OSM roads and offsets/gaps between the
 two datasets are visible. A select under the checkboxes (`nvdbColor` setting) picks the
 colouring: surface / functional class / owner (incl. state-subsidised private roads) /
-traffic ADT / speed limit / network; modes, stops and legend labels all live in
+traffic ADT / speed limit / lorry access (A–D) / bearing class / network; modes, stops and legend labels all live in
 `VIEWER_STYLE.nvdb.modes` (`nvdbColorExpr()` turns one into a MapLibre expression,
 `applyNvdbColorMode()` also redraws the legend). It's in `CLICKABLE_LINE_LAYERS`;
 clicking a stretch opens `showNvdbPopup()` (attributes + the OSM line under the same

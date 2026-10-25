@@ -27,12 +27,21 @@ Properties per stretch (absent = NVDB has no value there):
     gcm       cycle/foot way type, e.g. "Gång- och cykelbana" (GCM_vagtyp)
     cycle_route  tourist cycle route name  (Turismcykelled)
     bridge    Bro | Tunnel | …            (Bro_och_tunnel Konstruktion)
+    access    A–D, heavy-vehicle accessibility (Tillganglighet, the forestry road
+              classes): A all year, B all year except during spring thaw, C dry
+              season only (summer/bare ground), D winter (frozen ground) only
+    bk        bearing class: BK4 (74 t gross) | BK4s (BK4 with special terms) |
+              BK1 (64 t) | BK2 (51.4 t) | BK3 (37.5 t) — state/municipal roads
+    max_weight  permanent gross-weight limit in tonnes (BegrBruttovikt), rare
+
+Not included: temporary thaw restrictions (TFR Tjälrestriktion) — the package only
+holds the ones in force on its export date, so they're a snapshot, not a property.
 
 Owner names (Vaghallarnamn) are deliberately left out — for private roads they can
 be private persons.
 
 Several GeoPackages (e.g. one per county) can be given; they're processed one after
-another into the same output.
+another into the same output; links a neighbouring county already contributed are skipped.
 
 Usage:
     python extract_nvdb.py ~/lidar-output/trafikverket/dalarnas_lan/dalarnas_lan.gpkg \\
@@ -70,6 +79,9 @@ ATTR_LAYERS = [
     ('NVDB_DK_O_99_GCM_vagtyp',        {'Gcm_typ': 'gcm'}),
     ('NVDB_DK_O_108_Turismcykelled',   {'Namn': 'cycle_route'}),
     ('NVDB_DK_O_25_Bro_och_tunnel',    {'Konstruktion': 'bridge'}),
+    ('NVDB_DK_O_34_Tillganglighet',    {'Tillganglighetsklass': 'access'}),
+    ('NVDB_DK_O_10_Barighet',          {'Barighetsklass': 'bk'}),
+    ('NVDB_DK_O_6_BegrBruttovikt',     {'Hogsta_tillatna_bruttovikt': 'max_weight'}),
 ]
 
 EPS = 1e-9
@@ -81,7 +93,7 @@ def read_table(gpkg, layer, cols, bbox):
     return pd.DataFrame(df.drop(columns='geometry', errors='ignore'))
 
 
-def process(gpkg: str, bbox) -> gpd.GeoDataFrame:
+def process(gpkg: str, bbox, seen_links: set) -> gpd.GeoDataFrame:
     log(f"Reading {gpkg}")
     # Net_VAG_Link declares geometry type "3D Unknown", which pyogrio refuses to
     # read directly — CastToXY in SQLite SQL gives it a concrete 2D type.
@@ -91,6 +103,15 @@ def process(gpkg: str, bbox) -> gpd.GeoDataFrame:
     links = links[links.geom_type == 'LineString'].rename(
         columns={'LINKSEQUENCE_OID': 'eid', 'START_MEASURE': 'ls', 'END_MEASURE': 'le'})
     links = links[links['le'] - links['ls'] > EPS].reset_index(drop=True)
+    # A link sequence crossing a county border can be in both neighbours' packages —
+    # sometimes whole, sometimes clipped to each county's own part. Drop exactly the
+    # links an earlier package already contributed, keep the rest of the sequence.
+    keys = links['eid'] + '|' + links['ls'].round(9).astype(str) + '|' + links['le'].round(9).astype(str)
+    dup = keys.isin(seen_links).to_numpy()
+    if dup.any():
+        log(f"  skipping {dup.sum():,} links already read from an earlier package")
+    seen_links.update(keys[~dup])
+    links = links[~dup].reset_index(drop=True)
     log(f"  {len(links):,} links, {links.length.sum() / 1000:,.0f} km")
 
     tables = {}
@@ -103,6 +124,7 @@ def process(gpkg: str, bbox) -> gpd.GeoDataFrame:
             continue
         t = t.rename(columns={'ELEMENT_ID': 'eid', 'START_MEASURE': 's', 'END_MEASURE': 'e', **cols})
         t = t[t.e - t.s > EPS]
+        t['eid'] = t['eid'].astype(object)   # an empty table reads as a different dtype → merge_asof refuses
         tables[layer] = t
         bps += [t[['eid', 's']].rename(columns={'s': 'm'}), t[['eid', 'e']].rename(columns={'e': 'm'})]
         log(f"  {layer:34s} {len(t):8,} rows")
@@ -121,6 +143,7 @@ def process(gpkg: str, bbox) -> gpd.GeoDataFrame:
             if g.geom_type == 'LineString' and g.length > 0:
                 rows.append((eid, a, b, (a + b) / 2, g))
     pieces = pd.DataFrame(rows, columns=['eid', 'a', 'b', 'mid', 'geometry'])
+    pieces['eid'] = pieces['eid'].astype(object)
     log(f"  {len(pieces):,} pieces after cutting at attribute breakpoints")
 
     # Attribute lookup at each piece's midpoint
@@ -141,11 +164,13 @@ def process(gpkg: str, bbox) -> gpd.GeoDataFrame:
         pieces['net'] = pieces.net.map({'bilnät': 'bil', 'cykelnät': 'cykel', 'gångnät': 'gang'})
     if 'speed' in pieces:
         pieces['speed'] = pd.to_numeric(pieces.speed.replace({'gångfart': '7'}), errors='coerce')
+    if 'bk' in pieces:
+        pieces['bk'] = pieces.bk.replace({'BK 4 - Särskilda villkor': 'BK4s'}).str.replace(' ', '', regex=False)
     if 'klass' in pieces:
         pieces['klass'] = pd.to_numeric(pieces.klass, errors='coerce')
     if 'subsid' in pieces:
         pieces['subsid'] = np.where(pieces.subsid.notna(), 1, None)
-    for c in ('adt', 'adt_heavy', 'width'):
+    for c in ('adt', 'adt_heavy', 'width', 'max_weight'):
         if c in pieces:
             pieces[c] = pd.to_numeric(pieces[c], errors='coerce')
 
@@ -167,46 +192,48 @@ def process(gpkg: str, bbox) -> gpd.GeoDataFrame:
     return gdf
 
 
-def write_geojson(gdf: gpd.GeoDataFrame, path: Path) -> None:
-    """Plain FeatureCollection with null properties dropped per feature (keeps tiles small)."""
+def write_features(gdf: gpd.GeoDataFrame, f) -> int:
+    """Append features as newline-delimited GeoJSON, null properties dropped per feature
+    (keeps tiles small). One feature per line also lets tippecanoe --read-parallel split it."""
     gdf = gdf.to_crs(4326)
     props = [c for c in gdf.columns if c != 'geometry']
     coords = shapely.get_coordinates(gdf.geometry.values)
     counts = shapely.get_num_coordinates(gdf.geometry.values)
     offs = np.concatenate([[0], np.cumsum(counts)])
-    with open(path, 'w') as f:
-        f.write('{"type":"FeatureCollection","features":[\n')
-        for i, row in enumerate(gdf[props].itertuples(index=False)):
-            p = {}
-            for k, v in zip(props, row):
-                if v is None or (isinstance(v, float) and np.isnan(v)) or v is pd.NA:
-                    continue
-                if isinstance(v, (np.integer,)): v = int(v)
-                elif isinstance(v, (np.floating, float)): v = int(v) if float(v).is_integer() else round(float(v), 1)
-                p[k] = v
-            c = np.round(coords[offs[i]:offs[i + 1]], 6).tolist()
-            f.write(('' if i == 0 else ',\n') + json.dumps(
-                {'type': 'Feature', 'geometry': {'type': 'LineString', 'coordinates': c}, 'properties': p},
-                ensure_ascii=False, separators=(',', ':')))
-        f.write('\n]}\n')
+    for i, row in enumerate(gdf[props].itertuples(index=False)):
+        p = {}
+        for k, v in zip(props, row):
+            if v is None or v is pd.NA or (isinstance(v, float) and np.isnan(v)):
+                continue
+            if isinstance(v, np.integer): v = int(v)
+            elif isinstance(v, (np.floating, float)): v = int(v) if float(v).is_integer() else round(float(v), 1)
+            p[k] = v
+        c = np.round(coords[offs[i]:offs[i + 1]], 6).tolist()
+        f.write(json.dumps({'type': 'Feature', 'geometry': {'type': 'LineString', 'coordinates': c},
+                            'properties': p}, ensure_ascii=False, separators=(',', ':')) + '\n')
+    return len(gdf)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('gpkg', nargs='+', help='NVDB GeoPackage(s) from Lastkajen (county or national)')
-    ap.add_argument('--out', required=True, help='Output GeoJSON (WGS84)')
+    ap.add_argument('gpkg', nargs='+', help='NVDB GeoPackage(s) from Lastkajen, e.g. one per county')
+    ap.add_argument('--out', required=True, help='Output newline-delimited GeoJSON (WGS84)')
     ap.add_argument('--bbox', nargs=4, type=float, default=None, metavar=('MINX', 'MINY', 'MAXX', 'MAXY'),
                     help='Restrict to a SWEREF99TM bbox (for testing)')
     args = ap.parse_args()
 
     bbox = tuple(args.bbox) if args.bbox else None
-    parts = [process(g, bbox) for g in args.gpkg]
-    gdf = pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
     out = Path(args.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
-    write_geojson(gpd.GeoDataFrame(gdf, crs=3006), out)
-    log(f"Done: {out}  ({out.stat().st_size / 1e6:.0f} MB, {len(gdf):,} features)")
-    log(f"Next: tippecanoe -o nvdb.pmtiles -l nvdb -Z8 -z14 --no-feature-limit --no-tile-size-limit {out}")
+    # Packages are written one at a time so a whole-Sweden run never holds more than
+    # one county in memory (plus the set of link keys, for border de-duplication).
+    seen_links, total = set(), 0
+    with open(out, 'w') as f:
+        for g in args.gpkg:
+            total += write_features(process(g, bbox, seen_links), f)
+    log(f"Done: {out}  ({out.stat().st_size / 1e6:.0f} MB, {total:,} features)")
+    log(f"Next: tippecanoe -o nvdb.pmtiles -l nvdb -Z8 -z14 --no-feature-limit --no-tile-size-limit "
+        f"--read-parallel {out}")
 
 
 if __name__ == '__main__':

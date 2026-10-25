@@ -1769,6 +1769,7 @@ const NVDB_POPUP_FIELDS = [
   ['klass', 'Functional class'], ['owner', 'Owner'], ['subsid', 'State subsidy'],
   ['speed', 'Speed limit'], ['width', 'Width'], ['adt', 'Traffic (veh/day)'],
   ['adt_heavy', 'Heavy (veh/day)'], ['gcm', 'Cycle/foot way'], ['cycle_route', 'Cycle route'],
+  ['access', 'Lorry access'], ['bk', 'Bearing class'], ['max_weight', 'Weight limit'],
   ['bridge', 'Structure'],
 ];
 const NVDB_VALUE_LABELS = {
@@ -1776,6 +1777,8 @@ const NVDB_VALUE_LABELS = {
   surface: { belagd: 'paved', grus: 'gravel' },
   owner: { statlig: 'state', kommunal: 'municipal', enskild: 'private' },
   subsid: { 1: 'yes (open to public)' },
+  access: { A: 'A – all year', B: 'B – all year except thaw', C: 'C – dry season only', D: 'D – winter only' },
+  bk: { BK4: 'BK4 (74 t)', BK4s: 'BK4, special terms', BK1: 'BK1 (64 t)', BK2: 'BK2 (51.4 t)', BK3: 'BK3 (37.5 t)' },
 };
 function showNvdbPopup(e, f, osmFeature) {
   const p = f.properties;
@@ -1786,7 +1789,7 @@ function showNvdbPopup(e, f, osmFeature) {
   map.getSource('selected-feature').setData({ type: 'FeatureCollection',
     features: fragments.map(ff => ({ type: 'Feature', geometry: ff.geometry, properties: {} })) });
 
-  const unit = { speed: ' km/h', width: ' m' };
+  const unit = { speed: ' km/h', width: ' m', max_weight: ' t' };
   const rows = NVDB_POPUP_FIELDS.filter(([k]) => p[k] != null).map(([k, label]) => {
     const v = (NVDB_VALUE_LABELS[k] && NVDB_VALUE_LABELS[k][p[k]]) || p[k];
     return `<tr><td>${label}</td><td>${escapeHtml(String(v))}${unit[k] || ''}</td></tr>`;
