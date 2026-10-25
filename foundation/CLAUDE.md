@@ -89,6 +89,13 @@ them from git.
   GeoPackage). Superseded by `extract_osm.py` for the main pipeline; kept for reference.
 - **`export_osm_geojson.py`** — GeoPackage → WGS84 GeoJSON. Old one-off utility, not
   called by `build_pipeline.sh` — check before relying on it, may be dead code.
+- **`build_osm_sweden.sh`** — the same extraction + tippecanoe for all of Sweden →
+  `~/lidar-output/sweden.pmtiles` (~5GB, 8.4M features; copy on G:), which is what the
+  viewer loads now. Separate outputs (`~/lidar-output/osm_layers_sweden/`), so the
+  Dalarna `osm_layers/` used by `compute_rock.py` stay as they are. Runs entirely on
+  local disk: tippecanoe writing to `/mnt/g` crawled (3.5 h for about a third), locally
+  the tile step is ~26 min. Extraction takes hours. `--skip-extract` repacks only.
+  `refresh_osm.sh` still only rebuilds `dalarna.pmtiles`.
 - **`refresh_osm.sh`** — re-downloads the Geofabrik Sweden PBF and rebuilds only
   `dalarna.pmtiles`, leaving DTM/CHM/overlay/terrain untouched. Geofabrik regenerates
   extracts roughly every 24h from OSM planet diffs, so that snapshot cadence — not how

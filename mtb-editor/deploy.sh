@@ -12,8 +12,8 @@
 # bucket-scoped R2 API token.
 #
 # Usage:
-#   bash deploy.sh                        # static assets + dalarna + contours + rock + nvdb + terrain
-#   bash deploy.sh --skip-terrain         # static assets + dalarna + contours
+#   bash deploy.sh                        # static assets + sweden + contours + rock + nvdb + terrain
+#   bash deploy.sh --skip-terrain         # static assets + sweden + contours + rock + nvdb
 #   bash deploy.sh --with-overlay         # also upload vegheight/wetness.pmtiles
 #   bash deploy.sh --remote=X --bucket=Y  # override rclone remote/bucket name
 #
@@ -58,9 +58,16 @@ for f in index.html style.css style-config.js tracks.js favicon.ico; do
   rclone copyto "$MTB_DIR/$f" "$DEST/$f" "${RCLONE_COMMON[@]}"
 done
 
-log "Uploading coverage.geojson + dalarna.pmtiles"
+log "Uploading coverage.geojson + sweden.pmtiles"
 rclone copyto "$MTB_DIR/tiles/coverage.geojson" "$DEST/tiles/coverage.geojson" "${RCLONE_COMMON[@]}"
-rclone copyto "$MTB_DIR/tiles/dalarna.pmtiles"  "$DEST/tiles/dalarna.pmtiles"  "${RCLONE_COMMON[@]}" --progress -v
+# OSM vector layers for all of Sweden (foundation/build_osm_sweden.sh, ~5GB) — the
+# viewer no longer loads dalarna.pmtiles. Size floor as for the other big archives.
+SWEDEN_REAL="$(readlink -f "$MTB_DIR/tiles/sweden.pmtiles")"
+if [ "$(stat -c %s "$SWEDEN_REAL")" -lt 1000000000 ]; then
+  log "ERROR: $SWEDEN_REAL is under 1GB — not the full-Sweden OSM archive. Not uploading."
+  exit 1
+fi
+rclone copyto "$SWEDEN_REAL" "$DEST/tiles/sweden.pmtiles" "${RCLONE_BIG[@]}"
 
 # Contour lines (foundation/contours.py, full Dalarna, ~1GB). Optional: skipped
 # with a note if this checkout doesn't have it, rather than failing the deploy.

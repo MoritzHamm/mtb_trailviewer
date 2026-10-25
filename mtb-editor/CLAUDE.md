@@ -28,7 +28,9 @@ here today is the map viewing/rendering foundation that editor will sit on top o
 ## Tile files
 
 `tiles/` is gitignored (large binaries). Expected contents when fully populated:
-`dalarna.pmtiles` (OSM vector layers), `contours.pmtiles` (5 m contour lines, ~1GB,
+`sweden.pmtiles` (OSM vector layers for all of Sweden, ~5GB, symlink to
+`~/lidar-output/sweden.pmtiles` — built by `foundation/build_osm_sweden.sh`; the older
+Dalarna-only `dalarna.pmtiles` is no longer loaded), `contours.pmtiles` (5 m contour lines, ~1GB,
 copy of `~/lidar-output/contours/contours_dalarna_s3.pmtiles`), `terrain.pmtiles` (terrain-RGB elevation, symlink
 to `/mnt/g/lidar-output/terrain.pmtiles` on the desktop), `vegheight.pmtiles` +
 `wetness.pmtiles` (each a separate single-channel/grayscale WebP tileset — reworked
@@ -79,7 +81,7 @@ application (additive — the existing email-login policy stays for normal brows
 
 Uploads to Cloudflare R2 via `rclone` (remote `Dalarna-MTB`, bucket `dalarna-mtb`):
 static assets (`index.html`, `style.css`, `style-config.js`, `favicon.ico`, `fonts/`)
-every run, then `coverage.geojson` + `dalarna.pmtiles`, then optionally the large
+every run, then `coverage.geojson` + `sweden.pmtiles`, then optionally the large
 `terrain.pmtiles`/`overlay.pmtiles` (real paths resolved via `readlink -f` since rclone
 doesn't follow symlinks). `overlay.pmtiles` is skipped by default (`--with-overlay` to
 force) — that data is retired pending the rework noted in `foundation/CLAUDE.md`.
