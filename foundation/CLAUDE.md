@@ -95,6 +95,33 @@ them from git.
   often you run this — is the bottleneck for edits landing here. Not scheduled; run
   manually.
 
+### Trafikverket NVDB roads
+- **`extract_nvdb.py`** — Lastkajen NVDB GeoPackage(s) → one WGS84 GeoJSON of road
+  stretches with cycle-relevant attributes (`net`, `surface`, `klass`, `owner`, `speed`,
+  `width`, `adt`/`adt_heavy`, `name`, `ref`, `category`, `subsid`, `gcm`,
+  `cycle_route`, `bridge` — see the docstring for value sets), then tippecanoe →
+  `nvdb.pmtiles` (layer `nvdb`, z8–14, ~35MB for Dalarna). Source data CC0.
+  Input: county package `Dalarnas_län_GeoPackage.zip` (extracted to
+  `~/lidar-output/trafikverket/dalarnas_lan/dalarnas_lan.gpkg`); output
+  `~/lidar-output/nvdb/nvdb.{geojson,pmtiles}`. ~1 min for Dalarna. Not yet in
+  `build_pipeline.sh` — run by hand:
+  `python extract_nvdb.py <gpkg> --out ~/lidar-output/nvdb/nvdb.geojson`, then the
+  tippecanoe line it prints. Several county packages can be passed at once.
+- How NVDB is laid out: each attribute is its own layer, linearly referenced onto link
+  sequences (`ELEMENT_ID` + `START/END_MEASURE` as 0–1 fractions); `Net_VAG_Link` holds
+  the geometry as pieces of a link sequence with their own measure range. The script
+  cuts links at every attribute breakpoint, looks values up at each piece's midpoint
+  (`merge_asof`), and re-joins equal neighbours. Gotcha: `Net_VAG_Link` declares
+  geometry type "3D Unknown", which pyogrio refuses — read it through SQLite SQL with
+  `CastToXY(geom)`.
+- Owner names are deliberately left out (private roads can be owned by persons).
+- Comparison with OSM (scratchpad analysis, Oct 2026): around Falun OSM roads are
+  largely identical to NVDB (an import); in forest areas 26–35% of OSM road length is
+  3–20 m off NVDB, and LiDAR canopy height says NVDB is the one on the road bed
+  (95–99% of disputed samples canopy-free vs 64–70% for OSM). ~30% of OSM tracks around
+  Falun have no NVDB partner; NVDB cycle network is ~98% already in OSM as paths. Merge
+  approach (NVDB roads + OSM trails) undecided — the separate layer exists to compare first.
+
 ### Tile generation & packing
 - **`generate_elevation_tiles.py`** — DTM GeoTIFF → Mapbox terrain-RGB tiles.
   Encoding: `height_m = -10000 + (R*65536 + G*256 + B) * 0.1`. Z12–Z15 by default.

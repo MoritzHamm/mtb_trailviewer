@@ -12,7 +12,7 @@
 # bucket-scoped R2 API token.
 #
 # Usage:
-#   bash deploy.sh                        # static assets + dalarna + contours + rock + terrain
+#   bash deploy.sh                        # static assets + dalarna + contours + rock + nvdb + terrain
 #   bash deploy.sh --skip-terrain         # static assets + dalarna + contours
 #   bash deploy.sh --with-overlay         # also upload vegheight/wetness.pmtiles
 #   bash deploy.sh --remote=X --bucket=Y  # override rclone remote/bucket name
@@ -88,6 +88,14 @@ if [ -f "$MTB_DIR/tiles/rock.pmtiles" ]; then
   rclone copyto "$ROCK_REAL" "$DEST/tiles/rock.pmtiles" "${RCLONE_BIG[@]}"
 else
   log "No tiles/rock.pmtiles here — skipping (the Rock / cliffs background will be empty)"
+fi
+
+# Trafikverket NVDB roads (foundation/extract_nvdb.py, ~35MB for Dalarna). Optional.
+if [ -f "$MTB_DIR/tiles/nvdb.pmtiles" ]; then
+  log "Uploading nvdb.pmtiles"
+  rclone copyto "$(readlink -f "$MTB_DIR/tiles/nvdb.pmtiles")" "$DEST/tiles/nvdb.pmtiles" "${RCLONE_COMMON[@]}" --progress -v
+else
+  log "No tiles/nvdb.pmtiles here — skipping (the NVDB roads layer will be empty)"
 fi
 
 if [ "$SKIP_TERRAIN" = false ]; then

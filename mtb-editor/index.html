@@ -617,7 +617,8 @@ const DEFAULTS = {
   // categories default on, former areas-ish (fills) default off.
   osmCat_tracks: true, osmCat_waterways: true, osmCat_otherLines: true,
   osmCat_vegetation: false, osmCat_water: false, osmCat_others: true,
-  osmCat_contours: false,
+  osmCat_contours: false, osmCat_nvdb: false,
+  nvdbColor: VIEWER_STYLE.nvdb.defaultMode,
   viewLng: CENTER_LNG, viewLat: CENTER_LAT, viewZoom: START_ZOOM,
   viewBearing: 0, viewPitch: 0,
 };
@@ -746,6 +747,11 @@ const map = new maplibregl.Map({
         type: 'vector',
         url: `pmtiles://${TILE_BASE}/dalarna.pmtiles`,
         attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
+      },
+      nvdb: {
+        type: 'vector',
+        url: `pmtiles://${TILE_BASE}/nvdb.pmtiles`,
+        attribution: 'Trafikverket NVDB',
       },
       'selected-feature': {
         type: 'geojson',
@@ -934,6 +940,16 @@ const map = new maplibregl.Map({
           ],
         },
       },
+      // Trafikverket NVDB roads — comparison centreline over the OSM roads,
+      // coloured by the mode picked in the Map layers panel (applyNvdbColorMode)
+      { id: 'nvdb-road', type: 'line', source: 'nvdb', 'source-layer': 'nvdb', minzoom: 8,
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-width': ['interpolate', ['linear'], ['zoom'], ...VIEWER_STYLE.nvdb.width],
+          'line-opacity': VIEWER_STYLE.nvdb.opacity,
+          'line-color': nvdbColorExpr(VIEWER_STYLE.nvdb.defaultMode),
+        },
+      },
       // Waterways — excludes waterway=flowline (a directional flow indicator
       // within wetlands/deltas, not a real mapped watercourse) — technically
       // useful data but reads as visual noise on this map.
@@ -1052,7 +1068,35 @@ const OSM_CATEGORIES = [
   { key: 'water',      label: 'Water areas',      layers: ['osm-water', 'osm-wetland-pattern'] },
   { key: 'others',     label: 'Others',           layers: ['osm-buildings', 'osm-peaks-tri', 'osm-peaks-label', 'osm-places'] },
   { key: 'contours',   label: 'Contour lines',    layers: CONTOUR_LAYER_IDS },
+  { key: 'nvdb',       label: 'NVDB roads (Trafikverket)', layers: ['nvdb-road'] },
 ];
+
+// NVDB colour modes (VIEWER_STYLE.nvdb.modes) → a MapLibre line-color
+// expression. Unknown mode names fall back to the default rather than throwing,
+// so a stale saved setting can't break the style.
+function nvdbColorExpr(mode) {
+  const cfg = VIEWER_STYLE.nvdb;
+  const m = cfg.modes[mode] || cfg.modes[cfg.defaultMode];
+  const prop = typeof m.prop === 'string' ? ['get', m.prop] : m.prop;
+  const has = typeof m.prop === 'string' ? ['has', m.prop] : true;
+  let expr;
+  if (m.kind === 'match') {
+    expr = ['match', prop, ...m.stops.flatMap(([v, c]) => [v, c]), cfg.fallback];
+  } else {
+    expr = ['step', prop, m.stops[0][1], ...m.stops.slice(1).flatMap(([v, c]) => [v, c])];
+  }
+  return has === true ? expr : ['case', has, expr, cfg.fallback];
+}
+
+function applyNvdbColorMode(mode) {
+  if (map.getLayer('nvdb-road')) map.setPaintProperty('nvdb-road', 'line-color', nvdbColorExpr(mode));
+  const legend = document.getElementById('nvdb-legend');
+  if (!legend) return;
+  const m = VIEWER_STYLE.nvdb.modes[mode] || VIEWER_STYLE.nvdb.modes[VIEWER_STYLE.nvdb.defaultMode];
+  legend.innerHTML = [...m.stops.map(([, c, label]) => [c, label]), [VIEWER_STYLE.nvdb.fallback, 'no value']]
+    .map(([c, label]) => `<div class="nvdb-legend-row"><span style="background:${c}"></span>${escapeHtml(label)}</div>`)
+    .join('');
+}
 
 function applyAllOsmCategories() {
   OSM_CATEGORIES.forEach(cat => applyOsmVisibility(cat.layers, loadSetting('osmCat_' + cat.key)));
@@ -1089,6 +1133,7 @@ map.on('style.load', () => {
   applyBackground(loadSetting('background'));
   addWetlandPatternImage();
   applyAllOsmCategories();
+  applyNvdbColorMode(loadSetting('nvdbColor'));
   trailViewMode = loadSetting('trailView');
   applyTrailViewMode(trailViewMode);
 });
@@ -1402,7 +1447,7 @@ map.on('mouseleave', () => {
 // 'osm-road-casing' is skipped: it's just the wider outline of 'osm-road-fill'
 // on the same source-layer, querying both would return the same way twice.
 const CLICKABLE_LINE_LAYERS = [
-  'osm-road-fill', 'osm-track', 'osm-path',
+  'nvdb-road', 'osm-road-fill', 'osm-track', 'osm-path',
   'osm-waterway', 'osm-railway', 'osm-power', 'osm-natural-lines',
 ];
 
@@ -1588,6 +1633,10 @@ map.on('click', e => {
   }
 
   const f = features[0];
+  if (f.layer.id === 'nvdb-road') {
+    showNvdbPopup(e, f, features.find(ff => ff.layer.id !== 'nvdb-road'));
+    return;
+  }
   const label = featureLabel(f.properties);
   // Link to the route relation when this segment belongs to one — shows the
   // whole trail, not just the clicked fragment — otherwise fall back to the way.
@@ -1710,6 +1759,54 @@ map.on('click', e => {
     });
   }
 });
+
+// NVDB stretch popup — the stretch's attributes, plus the OSM line under the
+// same click (if any) so the two can be compared directly. Highlights every
+// rendered fragment of the same stretch: same link sequence and identical
+// attributes (one link sequence can hold several stretches).
+const NVDB_POPUP_FIELDS = [
+  ['ref', 'Road'], ['category', 'Category'], ['net', 'Network'], ['surface', 'Surface'],
+  ['klass', 'Functional class'], ['owner', 'Owner'], ['subsid', 'State subsidy'],
+  ['speed', 'Speed limit'], ['width', 'Width'], ['adt', 'Traffic (veh/day)'],
+  ['adt_heavy', 'Heavy (veh/day)'], ['gcm', 'Cycle/foot way'], ['cycle_route', 'Cycle route'],
+  ['bridge', 'Structure'],
+];
+const NVDB_VALUE_LABELS = {
+  net: { bil: 'car', cykel: 'cycle', gang: 'foot' },
+  surface: { belagd: 'paved', grus: 'gravel' },
+  owner: { statlig: 'state', kommunal: 'municipal', enskild: 'private' },
+  subsid: { 1: 'yes (open to public)' },
+};
+function showNvdbPopup(e, f, osmFeature) {
+  const p = f.properties;
+  const key = JSON.stringify(p);
+  const fragments = map.queryRenderedFeatures(undefined, { layers: ['nvdb-road'] })
+    .filter(ff => ff.properties.nvdb_id === p.nvdb_id && JSON.stringify(ff.properties) === key);
+  map.getSource('trail-view-pulse').setData({ type: 'FeatureCollection', features: [] });
+  map.getSource('selected-feature').setData({ type: 'FeatureCollection',
+    features: fragments.map(ff => ({ type: 'Feature', geometry: ff.geometry, properties: {} })) });
+
+  const unit = { speed: ' km/h', width: ' m' };
+  const rows = NVDB_POPUP_FIELDS.filter(([k]) => p[k] != null).map(([k, label]) => {
+    const v = (NVDB_VALUE_LABELS[k] && NVDB_VALUE_LABELS[k][p[k]]) || p[k];
+    return `<tr><td>${label}</td><td>${escapeHtml(String(v))}${unit[k] || ''}</td></tr>`;
+  }).join('');
+  let osmHtml = '<em>no OSM line here</em>';
+  if (osmFeature) {
+    const op = osmFeature.properties;
+    const bits = [op.highway, op.surface, op.tracktype].filter(Boolean).map(escapeHtml).join(', ');
+    osmHtml = `${escapeHtml(featureLabel(op))}${bits && bits !== escapeHtml(featureLabel(op)) ? ` (${bits})` : ''}`
+      + (op.osm_id != null ? ` <a href="https://www.openstreetmap.org/way/${op.osm_id}" target="_blank" rel="noopener">↗</a>` : '');
+  }
+  featurePopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '280px' })
+    .setLngLat(e.lngLat)
+    .setHTML(`<strong>${escapeHtml(p.name || (p.ref ? 'Road ' + p.ref : 'NVDB road'))}</strong>
+      <table class="nvdb-popup">${rows}</table>
+      <div class="nvdb-popup-osm">OSM: ${osmHtml}</div>
+      <div class="nvdb-popup-id">NVDB ${escapeHtml(String(p.nvdb_id))}</div>`)
+    .addTo(map);
+  featurePopup.on('close', clearSelection);
+}
 
 // Pointer cursor over the same clickable line features, so it's obvious
 // what's selectable and easier to aim at a thin line precisely.
@@ -2274,7 +2371,21 @@ osmLayersPanel.innerHTML = OSM_CATEGORIES.map(cat => `
   <label class="osm-layer-item">
     <input type="checkbox" data-osm-cat="${cat.key}" ${loadSetting('osmCat_' + cat.key) ? 'checked' : ''}>
     ${escapeHtml(cat.label)}
-  </label>`).join('');
+  </label>`).join('') + `
+  <div class="nvdb-color-pick">
+    <label>NVDB colour
+      <select id="nvdb-color-select">${Object.entries(VIEWER_STYLE.nvdb.modes).map(([k, m]) =>
+        `<option value="${k}" ${loadSetting('nvdbColor') === k ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+      </select>
+    </label>
+    <div id="nvdb-legend"></div>
+  </div>`;
+
+document.getElementById('nvdb-color-select').addEventListener('change', e => {
+  saveSetting('nvdbColor', e.target.value);
+  applyNvdbColorMode(e.target.value);
+});
+applyNvdbColorMode(loadSetting('nvdbColor'));
 
 osmLayersPanel.querySelectorAll('input[data-osm-cat]').forEach(input => {
   input.addEventListener('change', () => {

@@ -62,6 +62,61 @@ const VIEWER_STYLE = {
     cliff: { low: [240, 40, 40, 235],  high: [255, 60, 220, 255] },  // red → hot magenta (40° → 60° slope)
   },
 
+  // Trafikverket NVDB roads (tiles/nvdb.pmtiles, foundation/extract_nvdb.py) — a
+  // comparison layer drawn as a thin coloured centreline over the OSM roads, so
+  // offsets and gaps between the two show directly. Colour is one of `modes`,
+  // picked in the Map layers panel. Each mode: `prop` (property name or
+  // expression), `kind` 'match' (stops = [value, color, label]) or 'step'
+  // (stops = [lower bound or null, color, label], ascending); `fallback` colours
+  // stretches without a value. The panel legend is built from the same stops.
+  nvdb: {
+    opacity: 0.95,
+    width: [9, 0.6, 12, 1.2, 14, 2, 16, 3],   // zoom, px pairs
+    fallback: '#777777',
+    defaultMode: 'surface',
+    modes: {
+      surface: { label: 'Surface', prop: 'surface', kind: 'match', stops: [
+        ['grus',   '#e0a040', 'Gravel'],
+        ['belagd', '#40c4ff', 'Paved'],
+      ] },
+      klass: { label: 'Functional class (0 = most important)', prop: 'klass', kind: 'step', stops: [
+        [null, '#e53935', '0–2  national / regional'],
+        [3,    '#fb8c00', '3–4  regional / local main'],
+        [5,    '#fdd835', '5  local connector'],
+        [6,    '#7cb342', '6–7  local'],
+        [8,    '#26a69a', '8  minor / forest main'],
+        [9,    '#7e57c2', '9  minor private'],
+      ] },
+      owner: { label: 'Owner', kind: 'match',
+        prop: ['case', ['all', ['==', ['get', 'owner'], 'enskild'], ['has', 'subsid']], 'enskild_subsid', ['get', 'owner']],
+        stops: [
+          ['statlig',        '#1e88e5', 'State'],
+          ['kommunal',       '#43a047', 'Municipal'],
+          ['enskild_subsid', '#ff9800', 'Private, state subsidy (open to public)'],
+          ['enskild',        '#a1887f', 'Private'],
+        ] },
+      adt: { label: 'Traffic (vehicles/day, state roads only)', prop: 'adt', kind: 'step', stops: [
+        [null, '#66bb6a', '< 250'],
+        [250,  '#d4e157', '250–1000'],
+        [1000, '#ffca28', '1000–4000'],
+        [4000, '#ff7043', '4000–8000'],
+        [8000, '#d50000', '> 8000'],
+      ] },
+      speed: { label: 'Speed limit (km/h)', prop: 'speed', kind: 'step', stops: [
+        [null, '#66bb6a', '≤ 30'],
+        [40,   '#d4e157', '40–50'],
+        [60,   '#ffca28', '60–70'],
+        [80,   '#ff7043', '80–90'],
+        [100,  '#d50000', '≥ 100'],
+      ] },
+      net: { label: 'Network', prop: 'net', kind: 'match', stops: [
+        ['bil',   '#ffffff', 'Car'],
+        ['cykel', '#00e5ff', 'Cycle'],
+        ['gang',  '#ff4081', 'Foot'],
+      ] },
+    },
+  },
+
   // Selected-feature highlight (click a trail/road/etc.) — bright gold glow,
   // similar to OSM's own iD editor selection style. Two stacked line layers:
   // a wide blurred outer glow + a narrower, crisper core on top of it.

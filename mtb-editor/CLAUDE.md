@@ -35,7 +35,8 @@ to `/mnt/g/lidar-output/terrain.pmtiles` on the desktop), `vegheight.pmtiles` +
 from one packed `overlay.pmtiles`, see `foundation/CLAUDE.md`'s "Overlay status"; not
 yet deployed to R2 — the old 238GB `overlay.pmtiles` is still what's live there until
 the new build is run and pushed), `coverage.geojson` (mask showing what area has real
-data). On a fresh checkout (e.g. a laptop), this directory may have little or nothing
+data), `nvdb.pmtiles` (Trafikverket NVDB roads, symlink to
+`~/lidar-output/nvdb/nvdb.pmtiles`, see `foundation/CLAUDE.md` "Trafikverket NVDB roads"). On a fresh checkout (e.g. a laptop), this directory may have little or nothing
 in it — that's expected, see the tile-proxy section below.
 
 ## Local dev server + Cloudflare R2 tile proxy
@@ -172,6 +173,19 @@ with each tier's `minzoom` + width ramp from `VIEWER_STYLE.contours.tiers`, plus
 fills and below selection glow, trail status and every line layer, so trails stay on
 top. Tune the look in `style-config.js`; the stand-alone `contours-preview.html` has
 live sliders for finding tier minzooms.
+
+**NVDB roads** ("NVDB roads (Trafikverket)", `osmCat_nvdb`, **off by default**) — source
+`nvdb` → `tiles/nvdb.pmtiles`, one layer `nvdb-road` drawn as a thin coloured centreline
+just above `osm-path`, so it sits on top of the OSM roads and offsets/gaps between the
+two datasets are visible. A select under the checkboxes (`nvdbColor` setting) picks the
+colouring: surface / functional class / owner (incl. state-subsidised private roads) /
+traffic ADT / speed limit / network; modes, stops and legend labels all live in
+`VIEWER_STYLE.nvdb.modes` (`nvdbColorExpr()` turns one into a MapLibre expression,
+`applyNvdbColorMode()` also redraws the legend). It's in `CLICKABLE_LINE_LAYERS`;
+clicking a stretch opens `showNvdbPopup()` (attributes + the OSM line under the same
+click with its way link) instead of the OSM/trail popup — no trail actions on NVDB
+stretches. Comparison layer only for now: the merge decision (NVDB roads + OSM trails)
+is still open.
 
 **Water vs. wetland — a real, useful data duplication, not a bug to "fix".**
 `foundation/extract_osm_polygons.py`'s `WATER_NATURAL` and `NATURAL_LANDCOVER` sets both

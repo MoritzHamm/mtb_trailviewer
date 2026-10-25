@@ -93,6 +93,18 @@ input[type=checkbox] { accent-color: #5ba4cf; width: 15px; height: 15px; cursor:
 }
 .osm-layer-item:hover { background: rgba(255,255,255,0.06); }
 
+.nvdb-color-pick {
+  border-top: 1px solid #444;
+  margin-top: 4px;
+  padding: 8px 12px 6px;
+  font-size: 12px;
+  color: #ccc;
+}
+.nvdb-color-pick select { display: block; width: 100%; margin-top: 4px; font-size: 12px; }
+#nvdb-legend { margin-top: 6px; }
+.nvdb-legend-row { display: flex; align-items: center; gap: 6px; padding: 1px 0; white-space: nowrap; }
+.nvdb-legend-row span { display: inline-block; width: 18px; height: 4px; border-radius: 2px; flex: none; }
+
 select {
   background: #2a2a2a;
   color: #e8e8e8;
@@ -555,3 +567,9 @@ select:focus { border-color: #5ba4cf; }
   background: radial-gradient(circle, #2a2a40, #111);
   border: 1px solid #333;
 }
+
+.nvdb-popup { border-collapse: collapse; margin: 4px 0; font-size: 12px; }
+.nvdb-popup td { padding: 1px 6px 1px 0; vertical-align: top; }
+.nvdb-popup td:first-child { color: #888; white-space: nowrap; }
+.nvdb-popup-osm { font-size: 12px; margin-top: 4px; }
+.nvdb-popup-id { font-size: 11px; color: #888; margin-top: 2px; }
